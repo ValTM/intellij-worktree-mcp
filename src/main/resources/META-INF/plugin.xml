@@ -2,7 +2,24 @@
     <id>local.worktree.lifecycle</id>
     <name>Worktree Lifecycle MCP</name>
     <vendor>Local</vendor>
-    <description>Exact-directory project lifecycle tools using WebStorm's bundled MCP server.</description>
+    <description><![CDATA[
+        <p>Let your MCP client manage independent WebStorm projects by directory,
+        without attaching them to another project or opening duplicate windows.</p>
+        <ul>
+            <li>Inspect open projects and their window state.</li>
+            <li>Open or reuse a project; close an exact project with normal IDE safeguards.</li>
+            <li>Optionally merge all eligible macOS project windows into native tabs.</li>
+            <li>Find IDE actions by name or ID, inspect availability, and run an exact action.</li>
+        </ul>
+        <p>Requires WebStorm's bundled MCP Server and a connected MCP client.
+        Action availability uses the target project/window context, not the active editor or file.
+        macOS fullscreen and Spaces merging is best-effort.</p>
+    ]]></description>
+    <change-notes><![CDATA[
+        <p><b>0.3.0</b> — New plugin logo and expanded plugin description.</p>
+        <p><b>0.2.0</b> — Search IDE actions by name or ID with project-scoped availability.</p>
+        <p><b>0.1.0</b> — Exact-directory project open, reuse, close, window merge, and action execution.</p>
+    ]]></change-notes>
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.mcpServer</depends>
     <extensions defaultExtensionNs="com.intellij">
