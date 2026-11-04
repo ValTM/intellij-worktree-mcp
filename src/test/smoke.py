@@ -59,8 +59,26 @@ def main():
         initial = inventory()
         assert str(host) in initial and str(project) not in initial, "Use an unopened disposable project"
         assert tool("worktree_status").get("lastActiveDirectory") in initial, "Select an existing project once before running"
-        expected_tools = {"worktree_open", "worktree_close", "worktree_merge", "worktree_action", "worktree_status"}
+        expected_tools = {"worktree_open", "worktree_close", "worktree_merge", "worktree_action",
+                          "worktree_status", "worktree_search_actions"}
         assert expected_tools <= {t["name"] for t in rpc("tools/list", {})["tools"]}
+        def search(query, **options):
+            return tool("worktree_search_actions", query=query, directory=str(host), **options)
+
+        by_id = search("rEfOrMaTcOdE")
+        by_name = search("Reformat Code")
+        for result in (by_id, by_name):
+            assert result["status"] == "ok", result
+            reformat = next(a for a in result["actions"] if a["actionId"] == "ReformatCode")
+            assert "Reformat" in reformat["name"] and not reformat["enabled"], reformat
+        assert tool("worktree_action", actionId="ReformatCode", directory=str(host))["status"] == "unavailable"
+        assert search("Worktree.Nonexistent")["actions"] == []
+        bounded = search("Editor", limit=1)
+        assert len(bounded["actions"]) == 1 and bounded["truncated"], bounded
+        assert search(" ")["status"] == "invalid_query"
+        assert search("Editor", limit=0)["status"] == "invalid_query"
+        assert search("Editor", limit=101)["status"] == "invalid_query"
+        assert tool("worktree_search_actions", query="Reformat", directory=str(project))["status"] == "target_not_open"
         alias = Path(temporary) / "alias"
         alias.symlink_to(project, target_is_directory=True)
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -87,7 +105,7 @@ def main():
         assert combined["merge"]["directory"] == str(host), combined
         assert tool("worktree_close", directory=str(project))["status"] == "closed"
         assert set(inventory()) == set(initial)
-        print("PASS: canonical concurrent reuse, invalid path, explicit-context rejection, merge/no-op, geometry, exact close, open+merge")
+        print("PASS: action search by name/ID, disabled context, limits, canonical concurrent reuse, invalid path, explicit-context rejection, merge/no-op, geometry, exact close, open+merge")
 
 
 if __name__ == "__main__":

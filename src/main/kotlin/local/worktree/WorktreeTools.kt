@@ -9,6 +9,7 @@ import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.ActionPlaces
 import com.intellij.openapi.actionSystem.ActionUiKind
 import com.intellij.openapi.actionSystem.ActionUpdateThread
+import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.actionSystem.DataContext
@@ -160,6 +161,42 @@ class WorktreeTools : McpToolset {
         return encode(invoke(actionId, target))
     }
 
+    @McpTool
+    @McpDescription("Find registered IDE actions by case-insensitive name or ID substring without executing them. Returns exact action IDs, names and enabled status in the same project/window context as worktree_action, not the focused editor context. Action groups are excluded.")
+    suspend fun worktree_search_actions(
+        @McpDescription("Non-empty substring of the action name or ID.") query: String,
+        @McpDescription("Existing project directory whose window supplies the action context.") directory: String,
+        @McpDescription("Maximum results, from 1 to 100.") limit: Int = 50,
+    ): String {
+        val text = query.trim()
+        if (text.isEmpty() || limit !in 1..100) return encode(Outcome("invalid_query"))
+        val path = canonical(directory) ?: return encode(Outcome("invalid_directory", directory))
+        val target = onEdt { target(findProject(path)) }
+            ?: return encode(Outcome("target_not_open", path.toString()))
+        val manager = ActionManager.getInstance()
+        val matches = onEdt {
+            manager.getActionIdList("").asSequence().filter { id ->
+                !manager.isGroup(id) && (id.contains(text, ignoreCase = true) ||
+                    manager.getActionOrStub(id)?.templatePresentation?.text?.contains(text, ignoreCase = true) == true)
+            }.sorted().take(limit + 1).toList()
+        }
+        val actions = mutableListOf<Map<String, Any>>()
+        for (id in matches.take(limit)) {
+            val action = manager.getAction(id) ?: continue
+            val event = updatedEvent(action, target)
+                ?: return encode(Outcome("target_unavailable", path.toString()))
+            actions.add(mapOf(
+                "actionId" to id,
+                "name" to (event.presentation.text ?: id),
+                "enabled" to event.presentation.isEnabledAndVisible,
+            ))
+        }
+        return gson.toJson(mapOf(
+            "status" to "ok", "directory" to path.toString(),
+            "actions" to actions, "truncated" to (matches.size > limit),
+        ))
+    }
+
     private suspend fun merge(target: Target): Outcome {
         if (!SystemInfoRt.isMac) return Outcome("unsupported_platform")
         val windows = onEdt {
@@ -202,6 +239,20 @@ class WorktreeTools : McpToolset {
     private suspend fun invoke(actionId: String, target: Target): Outcome {
         val action = ActionManager.getInstance().getAction(actionId)
             ?: return Outcome("unknown_action", actionId = actionId)
+        val event = updatedEvent(action, target)
+            ?: return Outcome("target_unavailable", actionId = actionId)
+        if (!event.presentation.isEnabledAndVisible) {
+            return Outcome("unavailable", actionId = actionId)
+        }
+        return onEdt {
+            if (!target.available()) return@onEdt Outcome("target_unavailable", actionId = actionId)
+            if (modal()) return@onEdt Outcome("unavailable_modal", actionId = actionId)
+            val performed = writeIntentReadAction { ActionUtil.performAction(action, event) }
+            Outcome(if (performed.isPerformed) "dispatched" else "unavailable", target.project.basePath, actionId)
+        }
+    }
+
+    private suspend fun updatedEvent(action: AnAction, target: Target): AnActionEvent? {
         val event = onEdt {
             if (!target.available() || modal()) return@onEdt null
             val context = DataContext { key ->
@@ -215,19 +266,12 @@ class WorktreeTools : McpToolset {
                 action, context, action.templatePresentation.clone(),
                 ActionPlaces.UNKNOWN, ActionUiKind.NONE, null
             )
-        } ?: return Outcome("target_unavailable", actionId = actionId)
+        } ?: return null
         val update = if (action.actionUpdateThread == ActionUpdateThread.BGT) {
             withContext(Dispatchers.Default) { readAction { ActionUtil.updateAction(action, event) } }
         } else onEdt { ActionUtil.updateAction(action, event) }
-        if (!update.isPerformed || !event.presentation.isEnabledAndVisible) {
-            return Outcome("unavailable", actionId = actionId)
-        }
-        return onEdt {
-            if (!target.available()) return@onEdt Outcome("target_unavailable", actionId = actionId)
-            if (modal()) return@onEdt Outcome("unavailable_modal", actionId = actionId)
-            val performed = writeIntentReadAction { ActionUtil.performAction(action, event) }
-            Outcome(if (performed.isPerformed) "dispatched" else "unavailable", target.project.basePath, actionId)
-        }
+        if (!update.isPerformed) event.presentation.isEnabled = false
+        return event
     }
 
     private suspend fun lastTarget(): Target? {
