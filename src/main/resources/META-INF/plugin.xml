@@ -1,0 +1,11 @@
+<idea-plugin>
+    <id>local.worktree.lifecycle</id>
+    <name>Worktree Lifecycle MCP</name>
+    <vendor>Local</vendor>
+    <description>Exact-directory project lifecycle tools using WebStorm's bundled MCP server.</description>
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.mcpServer</depends>
+    <extensions defaultExtensionNs="com.intellij">
+        <mcpServer.mcpToolset implementation="local.worktree.WorktreeTools"/>
+    </extensions>
+</idea-plugin>
