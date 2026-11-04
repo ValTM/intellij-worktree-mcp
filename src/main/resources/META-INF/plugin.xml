@@ -3,7 +3,7 @@
     <name>Worktree Lifecycle MCP</name>
     <vendor>Local</vendor>
     <description><![CDATA[
-        <p>Let your MCP client manage independent WebStorm projects by directory,
+        <p>Let your MCP client manage independent IntelliJ Platform projects by directory,
         without attaching them to another project or opening duplicate windows.</p>
         <ul>
             <li>Inspect open projects and their window state.</li>
@@ -11,7 +11,8 @@
             <li>Optionally merge all eligible macOS project windows into native tabs.</li>
             <li>Find IDE actions by name or ID, inspect availability, and run an exact action.</li>
         </ul>
-        <p>Requires WebStorm's bundled MCP Server and a connected MCP client.
+        <p>Requires the bundled MCP Server and a connected MCP client.
+        Currently built and tested against WebStorm 2026.2.3 on macOS; other IDEs are not yet verified.
         Action availability uses the target project/window context, not the active editor or file.
         macOS fullscreen and Spaces merging is best-effort.</p>
     ]]></description>

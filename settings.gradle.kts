@@ -1,1 +1,1 @@
-rootProject.name = "webstorm-worktree-mcp"
+rootProject.name = "intellij-worktree-mcp"

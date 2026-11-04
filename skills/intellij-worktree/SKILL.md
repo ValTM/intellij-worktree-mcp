@@ -1,10 +1,12 @@
 ---
-name: webstorm-worktree
-description: Open/reuse WebStorm worktrees, optionally merge windows, close exact projects, or find and run project-scoped IDE actions.
+name: intellij-worktree
+description: Open/reuse IntelliJ Platform projects, optionally merge windows, close exact projects, or find and run project-scoped IDE actions.
 compatibility: macOS; Worktree Lifecycle MCP plugin and connected JetBrains MCP server.
 ---
 
-# WebStorm worktrees
+# IntelliJ worktrees
+
+Currently built and tested against WebStorm 2026.2.3 on macOS; other IDEs and builds are not yet verified.
 
 Use mounted MCP tools and their current schemas. Paths must be existing canonical absolute directories. Projects stay independent; never substitute Attach Project or a dummy project. Installation, configuration changes and restarts require separate authorization.
 
