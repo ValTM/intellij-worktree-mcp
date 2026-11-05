@@ -1,0 +1,25 @@
+name: Assign pull request author
+
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  assign-author:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Add author as assignee
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/$GH_REPO/issues/$PR_NUMBER/assignees" \
+            -f "assignees[]=$PR_AUTHOR"
