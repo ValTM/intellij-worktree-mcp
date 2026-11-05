@@ -36,6 +36,8 @@ The host's `projectPath` argument routes a call through an **already-open** proj
 
 Action search and execution share the same context. Without `filePath`, they use only the project/window, never the active editor. With an absolute or project-relative `filePath`, they use that project's already-open text editor, including its existing caret and selection, without selecting its tab. Files must stay inside the project's canonical directory; missing, binary, outside-project and escaping symlink paths return `invalid_file`. A valid file without an open text editor returns `file_not_open`. Search does not open tabs or execute actions; `dispatched` does not mean asynchronous work has completed. Action-specific authorization still applies.
 
+Unavailable actions include a `reason`: `disabled` or `hidden` describes the IDE presentation, not an inferred missing editor, selection or indexing requirement. `update_failed` / `update_rejected` and `dispatch_failed` / `dispatch_rejected` distinguish platform update and execution outcomes without exposing exception details. `target_unavailable` and `file_context_unavailable` identify context invalidation. A modal dialog returns `unavailable_modal` with `reason: modal_dialog`; dismiss it interactively before retrying. Search reports the same pre-dispatch reasons per action. Availability remains a snapshot; dispatch can still be rejected afterward.
+
 Trust and other IDE prompts remain interactive. After a mutation timeout, inspect state before retrying; a lost connection is not evidence that a close succeeded. Never close pre-existing projects or merge windows without authorization.
 
 ## Build and checks
