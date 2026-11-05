@@ -13,10 +13,11 @@
         </ul>
         <p>Requires the bundled MCP Server and a connected MCP client.
         Currently built and tested against WebStorm 2026.2.3 on macOS; other IDEs are not yet verified.
-        Action availability uses the target project/window context, not the active editor or file.
+        Actions use project/window context or an explicitly requested, already-open text editor in that project.
         macOS fullscreen and Spaces merging is best-effort.</p>
     ]]></description>
     <change-notes><![CDATA[
+        <p><b>0.4.0</b> — Optional explicit file/editor context for action search and dispatch without selecting tabs.</p>
         <p><b>0.3.0</b> — New plugin logo and expanded plugin description.</p>
         <p><b>0.2.0</b> — Search IDE actions by name or ID with project-scoped availability.</p>
         <p><b>0.1.0</b> — Exact-directory project open, reuse, close, window merge, and action execution.</p>
