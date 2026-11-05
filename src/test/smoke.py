@@ -76,7 +76,10 @@ def main():
             assert result["status"] == "ok", result
             reformat = next(a for a in result["actions"] if a["actionId"] == "ReformatCode")
             assert "Reformat" in reformat["name"] and not reformat["enabled"], reformat
-        assert tool("worktree_action", actionId="ReformatCode", directory=str(host))["status"] == "unavailable"
+            assert reformat["reason"] in {"disabled", "hidden"}, reformat
+        unavailable = tool("worktree_action", actionId="ReformatCode", directory=str(host))
+        assert unavailable["status"] == "unavailable", unavailable
+        assert unavailable["reason"] == reformat["reason"], unavailable
         assert search("Worktree.Nonexistent")["actions"] == []
         bounded = search("Editor", limit=1)
         assert len(bounded["actions"]) == 1 and bounded["truncated"], bounded
@@ -134,7 +137,8 @@ def main():
             assert editors_before["activeFilePath"].endswith("selected.json"), editors_before
             available = file_search(requested.relative_to(project))
             assert available["status"] == "ok", available
-            assert next(a for a in available["actions"] if a["actionId"] == "ReformatCode")["enabled"], available
+            reformat = next(a for a in available["actions"] if a["actionId"] == "ReformatCode")
+            assert reformat["enabled"] and reformat.get("reason") is None, available
             assert file_search(unopened)["status"] == "file_not_open"
             assert project_tool("get_all_open_file_paths") == editors_before, "Search changed editor tabs"
             assert requested.read_text() == selected.read_text() == unformatted, "Search mutated files"
