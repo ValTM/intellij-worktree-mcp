@@ -19,6 +19,7 @@
         · <a href="https://github.com/ValTM/intellij-worktree-mcp/issues">Report an issue</a></p>
     ]]></description>
     <change-notes><![CDATA[
+        <p><b>1.0.1</b> — Automated signed release publishing. Plugin functionality is unchanged from 1.0.0.</p>
         <p><b>1.0.0</b> — First stable release of project lifecycle and context-aware IDE action tools.</p>
         <p><b>0.5.1</b> — Allow IntelliJ Platform 262 patch updates while retaining the minimum supported build. Use platform-supported explicit action contexts for injected-language handling.</p>
         <p><b>0.5.0</b> — Shared action availability reasons for search and dispatch, including modal preflight.</p>
