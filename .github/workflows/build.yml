@@ -16,17 +16,55 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Detect Markdown-only changes
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep the required build check; only proven Markdown-only changes skip work.
+          echo "full=true" >> "$GITHUB_OUTPUT"
+          case "$EVENT_NAME:$GITHUB_REF" in
+            pull_request:*) comparison="$BASE_SHA...$HEAD_SHA" ;;
+            push:refs/heads/main) comparison="$BASE_SHA..$HEAD_SHA" ;;
+            *) exit 0 ;;
+          esac
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ || ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            exit 0
+          fi
+          # Missing history (including new branches/force pushes) fails closed.
+          if ! git diff --no-ext-diff --no-renames --name-only -z "$comparison" -- > "$RUNNER_TEMP/changed-paths"; then
+            exit 0
+          fi
+          [[ -s "$RUNNER_TEMP/changed-paths" ]] || exit 0
+          # NUL delimiters handle all filenames; disabling renames includes deletions.
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              *.md|*.markdown) ;;
+              *) exit 0 ;;
+            esac
+          done < "$RUNNER_TEMP/changed-paths"
+          echo "full=false" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        if: steps.changes.outputs.full != 'false'
         with:
           distribution: temurin
           java-version: '25'
       - name: Lint smoke client
+        if: steps.changes.outputs.full != 'false'
         run: |
           pipx run --spec ruff==0.17.3 ruff check src/test/smoke.py
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        if: steps.changes.outputs.full != 'false'
         with:
           gradle-version: '9.3.1'
       - name: Download verified WebStorm SDK
+        if: steps.changes.outputs.full != 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -37,6 +75,7 @@ jobs:
           mkdir webstorm-sdk
           tar -xzf WebStorm-2026.2.3.tar.gz -C webstorm-sdk --strip-components=1
       - name: Build, platform tests and compatibility
+        if: steps.changes.outputs.full != 'false'
         shell: bash
         run: |
           xvfb-run --auto-servernum make build test compatibility \
@@ -50,13 +89,14 @@ jobs:
           set -euo pipefail
           test -f "build/distributions/intellij-worktree-mcp-${GITHUB_REF_NAME#v}.zip"
       - name: Upload plugin ZIP
+        if: steps.changes.outputs.full != 'false'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: plugin
           path: build/distributions/*.zip
           if-no-files-found: error
       - name: Upload verification reports
-        if: always()
+        if: always() && steps.changes.outputs.full != 'false'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: verification-reports
