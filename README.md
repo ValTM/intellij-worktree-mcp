@@ -83,6 +83,6 @@ git tag v0.3.0
 git push origin v0.3.0
 ```
 
-Use a new version for subsequent releases. Tags must match the package version. A `v*` tag runs all checks before a separate, write-enabled job publishes a GitHub Release with the plugin ZIP, `SHA256SUMS` and generated release notes. Re-running the same tag workflow replaces its release assets. This does not publish to JetBrains Marketplace.
+Use a new version for subsequent releases. Tags must match the package version. A `v*` tag push runs all checks before a separate, write-enabled job signs and verifies the checked ZIP, publishes a GitHub Release with that ZIP, `SHA256SUMS` and generated release notes, then uploads the same signed ZIP to JetBrains Marketplace's default (Stable) channel. JetBrains approval still applies. Re-running the same tag workflow replaces GitHub release assets, but Marketplace rejects an already uploaded version.
 
-GitHub Actions uses its built-in token; no personal token or extra repository secret is required. The release job alone requests `contents: write`; build jobs have read-only repository permissions.
+GitHub releases use the built-in Actions token. Configure repository Actions secrets `PUBLISH_TOKEN` (Marketplace token), `PRIVATE_KEY`, `PRIVATE_KEY_PASSWORD` and `CERTIFICATE_CHAIN` for Marketplace publishing and signing. Supply the complete multiline PEM key/certificate, or Base64 of the complete file; removing PEM line breaks is not a supported encoding. Only the tag-only release job receives these secrets and requests `contents: write`; PR/build jobs remain read-only and receive no signing or publishing secrets.
