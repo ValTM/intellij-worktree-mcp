@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>local.worktree.lifecycle</id>
     <name>Worktree Lifecycle MCP</name>
-    <vendor>Local</vendor>
+    <vendor url="https://github.com/ValTM">ValTM</vendor>
     <description><![CDATA[
         <p>Let your MCP client manage independent IntelliJ Platform projects by directory,
         without attaching them to another project or opening duplicate windows.</p>
@@ -17,6 +17,7 @@
         macOS fullscreen and Spaces merging is best-effort.</p>
     ]]></description>
     <change-notes><![CDATA[
+        <p><b>1.0.0</b> — First stable release of project lifecycle and context-aware IDE action tools.</p>
         <p><b>0.5.1</b> — Allow IntelliJ Platform 262 patch updates while retaining the minimum supported build. Use platform-supported explicit action contexts for injected-language handling.</p>
         <p><b>0.5.0</b> — Shared action availability reasons for search and dispatch, including modal preflight.</p>
         <p><b>0.4.0</b> — Optional explicit file/editor context for action search and dispatch without selecting tabs.</p>
