@@ -1,7 +1,10 @@
 package local.worktree
 
 import com.google.gson.JsonParser
+import com.intellij.ide.impl.HeadlessDataManager
+import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
+import com.intellij.openapi.actionSystem.PlatformCoreDataKeys
 import com.intellij.openapi.application.EDT
 import com.intellij.openapi.application.readAction
 import com.intellij.openapi.application.writeIntentReadAction
@@ -18,7 +21,6 @@ import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlinx.coroutines.withContext
-import javax.swing.JPanel
 
 class WorktreeToolsTest : HeavyPlatformTestCase() {
     override fun runInDispatchThread(): Boolean = false
@@ -80,6 +82,7 @@ class WorktreeToolsTest : HeavyPlatformTestCase() {
         val selected = tools.resolveFile(project, directory, "content/selected.txt")!!
         val unopened = tools.resolveFile(project, directory, "content/unopened.txt")!!
         withContext(Dispatchers.EDT) {
+            HeadlessDataManager.fallbackToProductionDataManager(testRootDisposable)
             val manager = FileEditorManager.getInstance(project)
             try {
                 val requestedEditor = writeIntentReadAction {
@@ -91,14 +94,26 @@ class WorktreeToolsTest : HeavyPlatformTestCase() {
                 assertSame(selectedEditor, manager.selectedTextEditor)
                 val openBefore = manager.openFiles.toSet()
                 val file = readAction { tools.openFileContext(project, requested, directory) }!!
-                val context = tools.actionDataContext(project, JPanel(), file)
+                val component = selectedEditor.component
+                val context = tools.actionDataContext(project, component, file)
+                assertSame(component, PlatformCoreDataKeys.CONTEXT_COMPONENT.getData(context))
                 assertSame(requestedEditor, CommonDataKeys.EDITOR.getData(context))
                 assertSame(requested, CommonDataKeys.VIRTUAL_FILE.getData(context))
                 assertSame(requestedEditor.document, CommonDataKeys.EDITOR.getData(context)!!.document)
                 assertSame(project, CommonDataKeys.PSI_FILE.getData(context)!!.project)
                 assertEquals("requested", readAction { CommonDataKeys.PSI_FILE.getData(context)!!.text })
+                val injected = AnActionEvent.getInjectedDataContext(context)
+                assertSame(component, PlatformCoreDataKeys.CONTEXT_COMPONENT.getData(injected))
+                assertSame(requestedEditor, CommonDataKeys.EDITOR.getData(injected))
+                assertSame(requested, CommonDataKeys.VIRTUAL_FILE.getData(injected))
+                val projectOnly = tools.actionDataContext(project, component, null)
+                assertSame(component, PlatformCoreDataKeys.CONTEXT_COMPONENT.getData(projectOnly))
+                assertNull(CommonDataKeys.EDITOR.getData(projectOnly))
+                assertNull(CommonDataKeys.VIRTUAL_FILE.getData(projectOnly))
+                assertNull(CommonDataKeys.PSI_FILE.getData(projectOnly))
+                assertNull(CommonDataKeys.EDITOR.getData(AnActionEvent.getInjectedDataContext(projectOnly)))
                 assertNull(readAction { tools.openFileContext(project, unopened, directory) })
-                assertNull(CommonDataKeys.EDITOR.getData(tools.actionDataContext(project, JPanel(), null)))
+                assertNull(CommonDataKeys.VIRTUAL_FILE.getData(AnActionEvent.getInjectedDataContext(projectOnly)))
                 assertSame(selectedEditor, manager.selectedTextEditor)
                 assertEquals(openBefore, manager.openFiles.toSet())
                 writeIntentReadAction { manager.closeFile(requested) }
