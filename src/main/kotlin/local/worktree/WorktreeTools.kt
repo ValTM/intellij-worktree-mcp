@@ -22,12 +22,19 @@ import com.intellij.openapi.application.asContextElement
 import com.intellij.openapi.application.readAction
 import com.intellij.openapi.application.writeIntentReadAction
 import com.intellij.openapi.application.EDT
+import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.fileEditor.TextEditor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.project.ex.ProjectManagerEx
 import com.intellij.openapi.util.SystemInfoRt
 import com.intellij.openapi.wm.IdeFocusManager
 import com.intellij.openapi.wm.WindowManager
+import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.psi.PsiFile
+import com.intellij.psi.PsiManager
 import com.intellij.ui.mac.foundation.Foundation
 import com.intellij.ui.mac.foundation.MacUtil
 import kotlinx.coroutines.CompletableDeferred
@@ -41,6 +48,7 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.InvalidPathException
 import java.nio.file.Path
+import javax.swing.JComponent
 import javax.swing.JFrame
 
 class WorktreeTools : McpToolset {
@@ -60,6 +68,19 @@ class WorktreeTools : McpToolset {
 
     private data class Target(val project: Project, val frame: JFrame) {
         fun available(): Boolean = !project.isDisposed && project.isOpen && frame.isDisplayable
+    }
+
+    internal data class FileContext(
+        val file: VirtualFile, val psi: PsiFile, val fileEditor: TextEditor, val directory: Path,
+    ) {
+        val editor get() = fileEditor.editor
+
+        fun available(project: Project): Boolean =
+            file.isValid && psi.isValid && psi.project === project && fileEditor.isValid &&
+                Path.of(file.path).normalize().startsWith(directory) &&
+                file.canonicalPath?.let { Path.of(it).startsWith(directory) } == true &&
+                !editor.isDisposed && editor.project === project &&
+                FileDocumentManager.getInstance().getCachedDocument(file) === editor.document
     }
 
     @McpTool
@@ -150,29 +171,35 @@ class WorktreeTools : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Dispatch a registered IDE action by exact ID in the specified project window context. Does not simulate input or redirect to a focused project. Actions may open dialogs or change focus by their own behavior. Dispatched does not imply asynchronous work has completed; normal confirmation rules still apply.")
+    @McpDescription("Dispatch a registered IDE action by exact ID in the specified project window context. Optional filePath supplies an already-open text editor in that exact project, without selecting it; unopened files return file_not_open. Does not redirect to the focused file or project. Actions may open dialogs or change focus by their own behavior. Dispatched does not imply asynchronous completion; normal confirmation rules still apply.")
     suspend fun worktree_action(
         @McpDescription("Exact registered IDE action ID, not a search abbreviation.") actionId: String,
         @McpDescription("Existing project directory whose window supplies the action context.") directory: String,
+        @McpDescription("Optional absolute or project-relative text file inside this project, already open in a text editor. Uses its existing caret and selection without selecting its tab.") filePath: String? = null,
     ): String {
         val path = canonical(directory) ?: return encode(Outcome("invalid_directory", directory))
         val target = onEdt { target(findProject(path)) }
             ?: return encode(Outcome("target_not_open", path.toString()))
-        return encode(invoke(actionId, target))
+        return withFileContext(target, path, filePath) { file -> encode(invoke(actionId, target, file)) }
     }
 
     @McpTool
-    @McpDescription("Find registered IDE actions by case-insensitive name or ID substring without executing them. Returns exact action IDs, names and enabled status in the same project/window context as worktree_action, not the focused editor context. Action groups are excluded.")
+    @McpDescription("Find registered IDE actions by case-insensitive name or ID substring without executing them. Optional filePath uses an already-open text editor in the exact requested project, as worktree_action does. Never opens or selects editor tabs or redirects to the focused file. Without filePath, uses only project/window context. Action groups are excluded.")
     suspend fun worktree_search_actions(
         @McpDescription("Non-empty substring of the action name or ID.") query: String,
         @McpDescription("Existing project directory whose window supplies the action context.") directory: String,
         @McpDescription("Maximum results, from 1 to 100.") limit: Int = 50,
+        @McpDescription("Optional absolute or project-relative text file inside this project, already open in a text editor. Never opens or selects a tab.") filePath: String? = null,
     ): String {
         val text = query.trim()
         if (text.isEmpty() || limit !in 1..100) return encode(Outcome("invalid_query"))
         val path = canonical(directory) ?: return encode(Outcome("invalid_directory", directory))
         val target = onEdt { target(findProject(path)) }
             ?: return encode(Outcome("target_not_open", path.toString()))
+        return withFileContext(target, path, filePath) { file -> searchActions(text, limit, target, path, file) }
+    }
+
+    private suspend fun searchActions(text: String, limit: Int, target: Target, path: Path, file: FileContext?): String {
         val manager = ActionManager.getInstance()
         val matches = onEdt {
             manager.getActionIdList("").asSequence().filter { id ->
@@ -183,7 +210,7 @@ class WorktreeTools : McpToolset {
         val actions = mutableListOf<Map<String, Any>>()
         for (id in matches.take(limit)) {
             val action = manager.getAction(id) ?: continue
-            val event = updatedEvent(action, target)
+            val event = updatedEvent(action, target, file)
                 ?: return encode(Outcome("target_unavailable", path.toString()))
             actions.add(mapOf(
                 "actionId" to id,
@@ -236,10 +263,10 @@ class WorktreeTools : McpToolset {
         }
     }
 
-    private suspend fun invoke(actionId: String, target: Target): Outcome {
+    private suspend fun invoke(actionId: String, target: Target, file: FileContext? = null): Outcome {
         val action = ActionManager.getInstance().getAction(actionId)
             ?: return Outcome("unknown_action", actionId = actionId)
-        val event = updatedEvent(action, target)
+        val event = updatedEvent(action, target, file)
             ?: return Outcome("target_unavailable", actionId = actionId)
         if (!event.presentation.isEnabledAndVisible) {
             return Outcome("unavailable", actionId = actionId)
@@ -247,21 +274,19 @@ class WorktreeTools : McpToolset {
         return onEdt {
             if (!target.available()) return@onEdt Outcome("target_unavailable", actionId = actionId)
             if (modal()) return@onEdt Outcome("unavailable_modal", actionId = actionId)
+            if (file != null && !readAction { file.available(target.project) }) {
+                return@onEdt Outcome("target_unavailable", actionId = actionId)
+            }
             val performed = writeIntentReadAction { ActionUtil.performAction(action, event) }
             Outcome(if (performed.isPerformed) "dispatched" else "unavailable", target.project.basePath, actionId)
         }
     }
 
-    private suspend fun updatedEvent(action: AnAction, target: Target): AnActionEvent? {
+    private suspend fun updatedEvent(action: AnAction, target: Target, file: FileContext? = null): AnActionEvent? {
         val event = onEdt {
             if (!target.available() || modal()) return@onEdt null
-            val context = DataContext { key ->
-                when (key) {
-                    CommonDataKeys.PROJECT.name -> target.project
-                    PlatformCoreDataKeys.CONTEXT_COMPONENT.name -> target.frame.rootPane
-                    else -> null
-                }
-            }
+            if (file != null && !readAction { file.available(target.project) }) return@onEdt null
+            val context = actionDataContext(target.project, target.frame.rootPane, file)
             AnActionEvent.createEvent(
                 action, context, action.templatePresentation.clone(),
                 ActionPlaces.UNKNOWN, ActionUiKind.NONE, null
@@ -272,6 +297,71 @@ class WorktreeTools : McpToolset {
         } else onEdt { ActionUtil.updateAction(action, event) }
         if (!update.isPerformed) event.presentation.isEnabled = false
         return event
+    }
+
+    internal fun actionDataContext(project: Project, component: JComponent, file: FileContext?): DataContext =
+        DataContext { key ->
+            when (key) {
+                CommonDataKeys.PROJECT.name -> project
+                PlatformCoreDataKeys.CONTEXT_COMPONENT.name -> component
+                CommonDataKeys.VIRTUAL_FILE.name -> file?.file
+                CommonDataKeys.VIRTUAL_FILE_ARRAY.name -> file?.let { arrayOf(it.file) }
+                CommonDataKeys.PSI_FILE.name -> file?.psi
+                CommonDataKeys.PSI_ELEMENT.name -> file?.psi
+                CommonDataKeys.EDITOR.name, CommonDataKeys.HOST_EDITOR.name,
+                CommonDataKeys.EDITOR_EVEN_IF_INACTIVE.name -> file?.editor
+                CommonDataKeys.CARET.name -> file?.editor?.caretModel?.currentCaret
+                PlatformCoreDataKeys.FILE_EDITOR.name -> file?.fileEditor
+                else -> null
+            }
+        }
+
+    private suspend fun withFileContext(
+        target: Target, directory: Path, filePath: String?, block: suspend (FileContext?) -> String,
+    ): String {
+        if (filePath == null) return block(null)
+        val file = resolveFile(target.project, directory, filePath)
+            ?: return encode(Outcome("invalid_file", directory.toString()))
+        val context = onEdt {
+            readAction {
+                if (!target.available()) return@readAction null
+                openFileContext(target.project, file, directory)
+            }
+        } ?: return encode(Outcome("file_not_open", directory.toString()))
+        return block(context)
+    }
+
+    internal suspend fun resolveFile(project: Project, directory: Path, filePath: String): VirtualFile? {
+        val path = withContext(Dispatchers.IO) {
+            try {
+                if (filePath.isBlank()) return@withContext null
+                val requested = directory.resolve(filePath).normalize()
+                if (!requested.startsWith(directory)) return@withContext null
+                requested.toRealPath().takeIf { it.startsWith(directory) && Files.isRegularFile(it) }
+            } catch (_: IOException) {
+                null
+            } catch (_: InvalidPathException) {
+                null
+            }
+        } ?: return null
+        val file = withContext(Dispatchers.IO) {
+            LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path)
+        } ?: return null
+        return readAction {
+            file.takeIf {
+                !project.isDisposed && it.isValid && !it.isDirectory && !it.fileType.isBinary &&
+                    PsiManager.getInstance(project).findFile(it) != null &&
+                    FileDocumentManager.getInstance().getDocument(it) != null
+            }
+        }
+    }
+
+    internal fun openFileContext(project: Project, file: VirtualFile, directory: Path): FileContext? {
+        val psi = PsiManager.getInstance(project).findFile(file) ?: return null
+        // ponytail: reuse IDE-owned editors; temporary editors cannot outlive arbitrary asynchronous actions safely.
+        val editor = FileEditorManager.getInstance(project).getEditors(file).filterIsInstance<TextEditor>()
+            .firstOrNull { !it.editor.isDisposed && it.editor.project === project } ?: return null
+        return FileContext(file, psi, editor, directory).takeIf { it.available(project) }
     }
 
     private suspend fun lastTarget(): Target? {

@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "local.worktree"
-version = "0.3.0"
+version = "0.4.0"
 
 val webstormPath = providers.gradleProperty("webstormPath")
     .orElse("${System.getProperty("user.home")}/Applications/WebStorm.app")
