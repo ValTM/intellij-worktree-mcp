@@ -17,6 +17,7 @@
         macOS fullscreen and Spaces merging is best-effort.</p>
     ]]></description>
     <change-notes><![CDATA[
+        <p><b>0.5.0</b> — Shared action availability reasons for search and dispatch, including modal preflight.</p>
         <p><b>0.4.0</b> — Optional explicit file/editor context for action search and dispatch without selecting tabs.</p>
         <p><b>0.3.0</b> — New plugin logo and expanded plugin description.</p>
         <p><b>0.2.0</b> — Search IDE actions by name or ID with project-scoped availability.</p>
