@@ -29,12 +29,12 @@ The optional [agent skill](skills/intellij-worktree/SKILL.md) describes lifecycl
 | `worktree_open(directory, merge=false, targetDirectory?)` | Open or reuse a canonical directory without duplicate projects; optionally merge in the same call. |
 | `worktree_close(directory)` | Close exactly that project, retaining normal save/process/veto safeguards. |
 | `worktree_merge(targetDirectory?)` | Merge **all eligible windows**, not just a selected pair. Defaults to the captured last-active project. |
-| `worktree_search_actions(query, directory, limit=50)` | Find action IDs by case-insensitive name/ID substring; return names and availability. Limit: 1–100; groups excluded. |
-| `worktree_action(actionId, directory)` | Dispatch an exact registered action in that project's window context. |
+| `worktree_search_actions(query, directory, limit=50, filePath?)` | Find action IDs by case-insensitive name/ID substring; return names and availability. Limit: 1–100; groups excluded. |
+| `worktree_action(actionId, directory, filePath?)` | Dispatch an exact registered action in that project's window or explicitly requested editor context. |
 
 The host's `projectPath` argument routes a call through an **already-open** project. It is distinct from the `directory` being opened and from `targetDirectory`. Use canonical absolute paths and the schemas exposed by your client.
 
-Action search and execution share the same project/window context, **not the active editor/file context**. An action enabled in an editor menu may therefore be unavailable through these tools. Search does not execute actions; `dispatched` does not mean asynchronous work has completed. Action-specific authorization still applies.
+Action search and execution share the same context. Without `filePath`, they use only the project/window, never the active editor. With an absolute or project-relative `filePath`, they use that project's already-open text editor, including its existing caret and selection, without selecting its tab. Files must stay inside the project's canonical directory; missing, binary, outside-project and escaping symlink paths return `invalid_file`. A valid file without an open text editor returns `file_not_open`. Search does not open tabs or execute actions; `dispatched` does not mean asynchronous work has completed. Action-specific authorization still applies.
 
 Trust and other IDE prompts remain interactive. After a mutation timeout, inspect state before retrying; a lost connection is not evidence that a close succeeded. Never close pre-existing projects or merge windows without authorization.
 
@@ -68,7 +68,7 @@ python3 src/test/smoke.py \
   --project /absolute/disposable/project
 ```
 
-The smoke opens and closes the supplied project and merges **all sandbox project windows**. It checks action search, unavailable actions, bounded results, canonical concurrent reuse, exact closure and normal-window geometry. Trust prompts remain interactive; avoid saved fullscreen state for this normal-window scenario. This test is intentionally not part of headless Linux CI.
+The smoke opens and closes the supplied project and merges **all sandbox project windows**. It checks action search, background-file formatting without changing the selected file, invalid-file ownership, unopened-file rejection, bounded results, canonical concurrent reuse, exact closure and normal-window geometry. Trust prompts remain interactive; avoid saved fullscreen state for this normal-window scenario. This test is intentionally not part of headless Linux CI.
 
 ## CI and releases
 

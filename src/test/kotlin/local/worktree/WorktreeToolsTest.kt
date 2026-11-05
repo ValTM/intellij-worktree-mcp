@@ -1,16 +1,24 @@
 package local.worktree
 
 import com.google.gson.JsonParser
+import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.application.EDT
+import com.intellij.openapi.application.readAction
+import com.intellij.openapi.application.writeIntentReadAction
+import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.project.VetoableProjectManagerListener
 import com.intellij.testFramework.HeavyPlatformTestCase
+import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.testFramework.PsiTestUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlinx.coroutines.withContext
+import javax.swing.JPanel
 
 class WorktreeToolsTest : HeavyPlatformTestCase() {
     override fun runInDispatchThread(): Boolean = false
@@ -31,6 +39,76 @@ class WorktreeToolsTest : HeavyPlatformTestCase() {
             assertTrue(manager.openProjects.contains(project))
         } finally {
             withContext(Dispatchers.EDT) { manager.removeProjectManagerListener(veto) }
+        }
+    }
+
+    fun testExplicitFileResolutionRejectsOutsideSymlinkAndBinary() = runBlocking {
+        val directory = Files.createDirectories(Path.of(project.basePath!!)).toRealPath()
+        val content = Files.createDirectories(directory.resolve("content"))
+        Files.writeString(content.resolve("owned.txt"), "owned")
+        Files.write(content.resolve("binary.png"), byteArrayOf(0, 1, 2))
+        Files.writeString(directory.resolve("not-content.txt"), "not content")
+        val outside = createTempFile("outside.txt", "outside").toPath().toRealPath()
+        Files.createSymbolicLink(content.resolve("escape.txt"), outside)
+        val root = withContext(Dispatchers.IO) {
+            LocalFileSystem.getInstance().refreshAndFindFileByNioFile(content)!!
+        }
+        withContext(Dispatchers.EDT) { PsiTestUtil.addContentRoot(module, root) }
+        val tools = WorktreeTools()
+        assertNotNull(tools.resolveFile(project, directory, "content/owned.txt"))
+        assertNotNull(tools.resolveFile(project, directory, "not-content.txt"))
+        for (filePath in listOf(
+            outside.toString(), "content/escape.txt", "content/binary.png",
+            "content", "missing.txt", "", "../outside.txt",
+        )) {
+            assertNull(filePath, tools.resolveFile(project, directory, filePath))
+        }
+    }
+
+    fun testExplicitContextNeverSubstitutesSelectedEditor() = runBlocking {
+        val directory = Files.createDirectories(Path.of(project.basePath!!)).toRealPath()
+        val content = Files.createDirectories(directory.resolve("content"))
+        Files.writeString(content.resolve("requested.txt"), "requested")
+        Files.writeString(content.resolve("selected.txt"), "selected")
+        Files.writeString(content.resolve("unopened.txt"), "unopened")
+        val root = withContext(Dispatchers.IO) {
+            LocalFileSystem.getInstance().refreshAndFindFileByNioFile(content)!!
+        }
+        withContext(Dispatchers.EDT) { PsiTestUtil.addContentRoot(module, root) }
+        val tools = WorktreeTools()
+        val requested = tools.resolveFile(project, directory, "content/requested.txt")!!
+        val selected = tools.resolveFile(project, directory, "content/selected.txt")!!
+        val unopened = tools.resolveFile(project, directory, "content/unopened.txt")!!
+        withContext(Dispatchers.EDT) {
+            val manager = FileEditorManager.getInstance(project)
+            try {
+                val requestedEditor = writeIntentReadAction {
+                    manager.openTextEditor(OpenFileDescriptor(project, requested), true)
+                }!!
+                val selectedEditor = writeIntentReadAction {
+                    manager.openTextEditor(OpenFileDescriptor(project, selected), true)
+                }!!
+                assertSame(selectedEditor, manager.selectedTextEditor)
+                val openBefore = manager.openFiles.toSet()
+                val file = readAction { tools.openFileContext(project, requested, directory) }!!
+                val context = tools.actionDataContext(project, JPanel(), file)
+                assertSame(requestedEditor, CommonDataKeys.EDITOR.getData(context))
+                assertSame(requested, CommonDataKeys.VIRTUAL_FILE.getData(context))
+                assertSame(requestedEditor.document, CommonDataKeys.EDITOR.getData(context)!!.document)
+                assertSame(project, CommonDataKeys.PSI_FILE.getData(context)!!.project)
+                assertEquals("requested", readAction { CommonDataKeys.PSI_FILE.getData(context)!!.text })
+                assertNull(readAction { tools.openFileContext(project, unopened, directory) })
+                assertNull(CommonDataKeys.EDITOR.getData(tools.actionDataContext(project, JPanel(), null)))
+                assertSame(selectedEditor, manager.selectedTextEditor)
+                assertEquals(openBefore, manager.openFiles.toSet())
+                writeIntentReadAction { manager.closeFile(requested) }
+                assertFalse(readAction { file.available(project) })
+            } finally {
+                writeIntentReadAction {
+                    manager.closeFile(requested)
+                    manager.closeFile(selected)
+                }
+            }
         }
     }
 }
