@@ -1,6 +1,7 @@
 package local.worktree
 
 import com.google.gson.Gson
+import com.intellij.ide.DataManager
 import com.intellij.ide.impl.OpenProjectTask
 import com.intellij.mcpserver.McpToolset
 import com.intellij.mcpserver.annotations.McpDescription
@@ -12,6 +13,7 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
+import com.intellij.openapi.actionSystem.CustomizedDataContext
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.actionSystem.PlatformCoreDataKeys
 import com.intellij.openapi.actionSystem.ex.ActionUtil
@@ -318,19 +320,29 @@ class WorktreeTools : McpToolset {
     }
 
     internal fun actionDataContext(project: Project, component: JComponent, file: FileContext?): DataContext =
-        DataContext { key ->
-            when (key) {
-                CommonDataKeys.PROJECT.name -> project
-                PlatformCoreDataKeys.CONTEXT_COMPONENT.name -> component
-                CommonDataKeys.VIRTUAL_FILE.name -> file?.file
-                CommonDataKeys.VIRTUAL_FILE_ARRAY.name -> file?.let { arrayOf(it.file) }
-                CommonDataKeys.PSI_FILE.name -> file?.psi
-                CommonDataKeys.PSI_ELEMENT.name -> file?.psi
-                CommonDataKeys.EDITOR.name, CommonDataKeys.HOST_EDITOR.name,
-                CommonDataKeys.EDITOR_EVEN_IF_INACTIVE.name -> file?.editor
-                CommonDataKeys.CARET.name -> file?.editor?.caretModel?.currentCaret
-                PlatformCoreDataKeys.FILE_EDITOR.name -> file?.fileEditor
-                else -> null
+        CustomizedDataContext.withSnapshot(DataManager.getInstance().getDataContext(component)) { sink ->
+            sink[CommonDataKeys.PROJECT] = project
+            // Null snapshot values are ignored; explicit nulls prevent selected-editor fallback.
+            if (file == null) {
+                sink.setNull(CommonDataKeys.VIRTUAL_FILE)
+                sink.setNull(CommonDataKeys.VIRTUAL_FILE_ARRAY)
+                sink.setNull(CommonDataKeys.PSI_FILE)
+                sink.setNull(CommonDataKeys.PSI_ELEMENT)
+                sink.setNull(CommonDataKeys.EDITOR)
+                sink.setNull(CommonDataKeys.HOST_EDITOR)
+                sink.setNull(CommonDataKeys.EDITOR_EVEN_IF_INACTIVE)
+                sink.setNull(CommonDataKeys.CARET)
+                sink.setNull(PlatformCoreDataKeys.FILE_EDITOR)
+            } else {
+                sink[CommonDataKeys.VIRTUAL_FILE] = file.file
+                sink[CommonDataKeys.VIRTUAL_FILE_ARRAY] = arrayOf(file.file)
+                sink[CommonDataKeys.PSI_FILE] = file.psi
+                sink[CommonDataKeys.PSI_ELEMENT] = file.psi
+                sink[CommonDataKeys.EDITOR] = file.editor
+                sink[CommonDataKeys.HOST_EDITOR] = file.editor
+                sink[CommonDataKeys.EDITOR_EVEN_IF_INACTIVE] = file.editor
+                sink[CommonDataKeys.CARET] = file.editor.caretModel.currentCaret
+                sink[PlatformCoreDataKeys.FILE_EDITOR] = file.fileEditor
             }
         }
 
