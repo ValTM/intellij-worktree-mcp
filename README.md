@@ -17,7 +17,7 @@ Window merging is macOS-only and uses the IDE's native Merge All Windows action.
 3. Enable **Settings → Tools → MCP Server** and connect your MCP client using the IDE-provided configuration. Do not disable confirmation safeguards.
 4. Open a real project. The tools are supplied through the existing JetBrains MCP connection; there is no separate server to start.
 
-Plugin name: **Worktree Lifecycle MCP**. Stable plugin ID: `local.worktree.lifecycle`.
+Plugin name: **Worktree Lifecycle MCP**. Stable plugin ID: `com.github.valtm.worktree.lifecycle`.
 
 The optional [agent skill](skills/intellij-worktree/SKILL.md) describes lifecycle, authorization and bootstrap rules. Install it according to your agent's skill conventions; plugin installation does not install the skill.
 
