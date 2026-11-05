@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Detect Markdown-only changes
+      - name: Detect documentation and GitHub configuration changes
         id: changes
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -27,7 +27,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Keep the required build check; only proven Markdown-only changes skip work.
+          # Keep the required build check; only documentation/GitHub YAML changes skip work.
           echo "full=true" >> "$GITHUB_OUTPUT"
           case "$EVENT_NAME:$GITHUB_REF" in
             pull_request:*) comparison="$BASE_SHA...$HEAD_SHA" ;;
@@ -45,7 +45,7 @@ jobs:
           # NUL delimiters handle all filenames; disabling renames includes deletions.
           while IFS= read -r -d '' path; do
             case "$path" in
-              *.md|*.markdown) ;;
+              *.md|*.markdown|.github/*.yml|.github/*.yaml) ;;
               *) exit 0 ;;
             esac
           done < "$RUNNER_TEMP/changed-paths"
