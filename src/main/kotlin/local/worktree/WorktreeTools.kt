@@ -64,7 +64,10 @@ class WorktreeTools : McpToolset {
         val directory: String? = null,
         val actionId: String? = null,
         val merge: Outcome? = null,
+        val reason: String? = null,
     )
+
+    private data class ActionAvailability(val event: AnActionEvent? = null, val reason: String? = null)
 
     private data class Target(val project: Project, val frame: JFrame) {
         fun available(): Boolean = !project.isDisposed && project.isOpen && frame.isDisplayable
@@ -177,6 +180,7 @@ class WorktreeTools : McpToolset {
         @McpDescription("Existing project directory whose window supplies the action context.") directory: String,
         @McpDescription("Optional absolute or project-relative text file inside this project, already open in a text editor. Uses its existing caret and selection without selecting its tab.") filePath: String? = null,
     ): String {
+        if (modalPreflight()) return encode(Outcome("unavailable_modal", actionId = actionId, reason = "modal_dialog"))
         val path = canonical(directory) ?: return encode(Outcome("invalid_directory", directory))
         val target = onEdt { target(findProject(path)) }
             ?: return encode(Outcome("target_not_open", path.toString()))
@@ -191,6 +195,7 @@ class WorktreeTools : McpToolset {
         @McpDescription("Maximum results, from 1 to 100.") limit: Int = 50,
         @McpDescription("Optional absolute or project-relative text file inside this project, already open in a text editor. Never opens or selects a tab.") filePath: String? = null,
     ): String {
+        if (modalPreflight()) return encode(Outcome("unavailable_modal", reason = "modal_dialog"))
         val text = query.trim()
         if (text.isEmpty() || limit !in 1..100) return encode(Outcome("invalid_query"))
         val path = canonical(directory) ?: return encode(Outcome("invalid_directory", directory))
@@ -207,15 +212,15 @@ class WorktreeTools : McpToolset {
                     manager.getActionOrStub(id)?.templatePresentation?.text?.contains(text, ignoreCase = true) == true)
             }.sorted().take(limit + 1).toList()
         }
-        val actions = mutableListOf<Map<String, Any>>()
+        val actions = mutableListOf<Map<String, Any?>>()
         for (id in matches.take(limit)) {
             val action = manager.getAction(id) ?: continue
-            val event = updatedEvent(action, target, file)
-                ?: return encode(Outcome("target_unavailable", path.toString()))
+            val availability = updatedEvent(action, target, file)
             actions.add(mapOf(
                 "actionId" to id,
-                "name" to (event.presentation.text ?: id),
-                "enabled" to event.presentation.isEnabledAndVisible,
+                "name" to (availability.event?.presentation?.text ?: id),
+                "enabled" to (availability.reason == null),
+                "reason" to availability.reason,
             ))
         }
         return gson.toJson(mapOf(
@@ -266,37 +271,50 @@ class WorktreeTools : McpToolset {
     private suspend fun invoke(actionId: String, target: Target, file: FileContext? = null): Outcome {
         val action = ActionManager.getInstance().getAction(actionId)
             ?: return Outcome("unknown_action", actionId = actionId)
-        val event = updatedEvent(action, target, file)
-            ?: return Outcome("target_unavailable", actionId = actionId)
-        if (!event.presentation.isEnabledAndVisible) {
-            return Outcome("unavailable", actionId = actionId)
+        val availability = updatedEvent(action, target, file)
+        val event = availability.event
+        if (availability.reason != null || event == null) {
+            return Outcome("unavailable", actionId = actionId, reason = availability.reason)
         }
         return onEdt {
-            if (!target.available()) return@onEdt Outcome("target_unavailable", actionId = actionId)
-            if (modal()) return@onEdt Outcome("unavailable_modal", actionId = actionId)
+            if (!target.available()) return@onEdt Outcome("target_unavailable", actionId = actionId, reason = "target_unavailable")
+            if (modal()) return@onEdt Outcome("unavailable_modal", actionId = actionId, reason = "modal_dialog")
             if (file != null && !readAction { file.available(target.project) }) {
-                return@onEdt Outcome("target_unavailable", actionId = actionId)
+                return@onEdt Outcome("target_unavailable", actionId = actionId, reason = "file_context_unavailable")
             }
             val performed = writeIntentReadAction { ActionUtil.performAction(action, event) }
-            Outcome(if (performed.isPerformed) "dispatched" else "unavailable", target.project.basePath, actionId)
+            Outcome(
+                if (performed.isPerformed) "dispatched" else "unavailable", target.project.basePath, actionId,
+                reason = if (performed.isPerformed) null else if (performed.isFailed) "dispatch_failed" else "dispatch_rejected",
+            )
         }
     }
 
-    private suspend fun updatedEvent(action: AnAction, target: Target, file: FileContext? = null): AnActionEvent? {
-        val event = onEdt {
-            if (!target.available() || modal()) return@onEdt null
-            if (file != null && !readAction { file.available(target.project) }) return@onEdt null
-            val context = actionDataContext(target.project, target.frame.rootPane, file)
-            AnActionEvent.createEvent(
-                action, context, action.templatePresentation.clone(),
+    private suspend fun updatedEvent(action: AnAction, target: Target, file: FileContext? = null): ActionAvailability {
+        val availability = onEdt {
+            if (!target.available()) return@onEdt ActionAvailability(reason = "target_unavailable")
+            if (modal()) return@onEdt ActionAvailability(reason = "modal_dialog")
+            if (file != null && !readAction { file.available(target.project) }) {
+                return@onEdt ActionAvailability(reason = "file_context_unavailable")
+            }
+            val dataContext = actionDataContext(target.project, target.frame.rootPane, file)
+            ActionAvailability(AnActionEvent.createEvent(
+                action, dataContext, action.templatePresentation.clone(),
                 ActionPlaces.UNKNOWN, ActionUiKind.NONE, null
-            )
-        } ?: return null
+            ))
+        }
+        val event = availability.event ?: return availability
         val update = if (action.actionUpdateThread == ActionUpdateThread.BGT) {
             withContext(Dispatchers.Default) { readAction { ActionUtil.updateAction(action, event) } }
         } else onEdt { ActionUtil.updateAction(action, event) }
-        if (!update.isPerformed) event.presentation.isEnabled = false
-        return event
+        val reason = when {
+            update.isFailed -> "update_failed"
+            !update.isPerformed -> "update_rejected"
+            !event.presentation.isVisible -> "hidden"
+            !event.presentation.isEnabled -> "disabled"
+            else -> null
+        }
+        return ActionAvailability(event, reason)
     }
 
     internal fun actionDataContext(project: Project, component: JComponent, file: FileContext?): DataContext =
@@ -400,6 +418,9 @@ class WorktreeTools : McpToolset {
     }
 
     private fun modal(): Boolean = ModalityState.current() != ModalityState.nonModal()
+
+    private suspend fun modalPreflight(): Boolean =
+        withContext(Dispatchers.EDT + ModalityState.any().asContextElement()) { modal() }
 
     private suspend fun <T> onEdt(block: suspend () -> T): T =
         withContext(Dispatchers.EDT + ModalityState.nonModal().asContextElement()) { block() }
