@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "local.worktree"
-version = "0.5.1"
+version = "1.0.0"
 
 val webstormPath = providers.gradleProperty("webstormPath")
     .orElse("${System.getProperty("user.home")}/Applications/WebStorm.app")
@@ -50,6 +50,16 @@ intellijPlatform {
         ides {
             local(file(webstormPath.get()))
         }
+    }
+}
+
+tasks.named("verifyPluginSignature") {
+    dependsOn("signPlugin")
+}
+
+tasks.jar {
+    from("LICENSE") {
+        into("META-INF")
     }
 }
 
