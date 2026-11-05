@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "local.worktree"
-version = "0.5.0"
+version = "1.0.0"
 
 val webstormPath = providers.gradleProperty("webstormPath")
     .orElse("${System.getProperty("user.home")}/Applications/WebStorm.app")
@@ -43,7 +43,7 @@ intellijPlatform {
     pluginConfiguration {
         ideaVersion {
             sinceBuild = "262.10968.77"
-            untilBuild = "262.10968.77"
+            untilBuild = "262.*"
         }
     }
     pluginVerification {
