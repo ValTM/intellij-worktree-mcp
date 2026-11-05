@@ -106,10 +106,10 @@ jobs:
           if-no-files-found: ignore
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -117,6 +117,50 @@ jobs:
         with:
           name: plugin
           path: dist
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Download verified JetBrains ZIP signer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl --fail --location --retry 3 --output signer.jar \
+            https://repo.maven.apache.org/maven2/org/jetbrains/marketplace-zip-signer/0.1.45/marketplace-zip-signer-0.1.45-cli.jar
+          echo 'fc48b8a4165907e8164fc2a1256ed0d0fe6f7b25acb33ac48660ab13e7f64bb8  signer.jar' | sha256sum --check
+      - name: Sign and verify release ZIP
+        env:
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
+          CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${PRIVATE_KEY:?Missing PRIVATE_KEY}" "${PRIVATE_KEY_PASSWORD:?Missing PRIVATE_KEY_PASSWORD}" "${CERTIFICATE_CHAIN:?Missing CERTIFICATE_CHAIN}"
+          umask 077
+          signing_dir="$(mktemp -d)"
+          export SIGNING_DIR="$signing_dir"
+          trap 'rm -rf "$signing_dir"' EXIT
+          python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          for name in ("PRIVATE_KEY", "CERTIFICATE_CHAIN"):
+              value = os.environ[name].strip()
+              if not value.startswith("-----BEGIN "):
+                  value = base64.b64decode(value, validate=True).decode("ascii")
+              Path(os.environ["SIGNING_DIR"], name).write_text(value + "\n")
+          PY
+          archive="intellij-worktree-mcp-${GITHUB_REF_NAME#v}.zip"
+          java -jar "$RUNNER_TEMP/signer.jar" sign \
+            -in "dist/$archive" -out "$signing_dir/$archive" \
+            -key-file "$signing_dir/PRIVATE_KEY" -key-pass "$PRIVATE_KEY_PASSWORD" \
+            -cert-file "$signing_dir/CERTIFICATE_CHAIN"
+          java -jar "$RUNNER_TEMP/signer.jar" verify \
+            -in "$signing_dir/$archive" -cert "$signing_dir/CERTIFICATE_CHAIN"
+          mv "$signing_dir/$archive" "dist/$archive"
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -131,3 +175,15 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" ./*.zip SHA256SUMS --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
           fi
+      - name: Publish JetBrains Marketplace update
+        env:
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${PUBLISH_TOKEN:?Missing PUBLISH_TOKEN}"
+          curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer $PUBLISH_TOKEN" \
+            --form 'xmlId=com.github.valtm.worktree.lifecycle' \
+            --form "file=@dist/intellij-worktree-mcp-${GITHUB_REF_NAME#v}.zip" \
+            https://plugins.jetbrains.com/api/updates/upload
