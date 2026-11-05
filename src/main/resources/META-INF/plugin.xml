@@ -1,5 +1,5 @@
-<idea-plugin>
-    <id>local.worktree.lifecycle</id>
+<idea-plugin url="https://github.com/ValTM/intellij-worktree-mcp">
+    <id>com.github.valtm.worktree.lifecycle</id>
     <name>Worktree Lifecycle MCP</name>
     <vendor url="https://github.com/ValTM">ValTM</vendor>
     <description><![CDATA[
@@ -15,6 +15,8 @@
         Supports IntelliJ Platform builds 262.10968.77 through 262.*.
         Actions use project/window context or an explicitly requested, already-open text editor in that project.
         macOS fullscreen and Spaces merging is best-effort.</p>
+        <p><a href="https://github.com/ValTM/intellij-worktree-mcp/blob/main/README.md">Documentation</a>
+        · <a href="https://github.com/ValTM/intellij-worktree-mcp/issues">Report an issue</a></p>
     ]]></description>
     <change-notes><![CDATA[
         <p><b>1.0.0</b> — First stable release of project lifecycle and context-aware IDE action tools.</p>
