@@ -12,13 +12,14 @@
             <li>Find IDE actions by name or ID, inspect availability, and run an exact action.</li>
         </ul>
         <p>Requires the bundled MCP Server and a connected MCP client.
-        Supports IntelliJ Platform builds 262.10968.77 through 262.*.
+        Supports IntelliJ Platform builds 262.10968.77 through 263.*.
         Actions use project/window context or an explicitly requested, already-open text editor in that project.
         macOS fullscreen and Spaces merging is best-effort.</p>
         <p><a href="https://github.com/ValTM/intellij-worktree-mcp/blob/main/README.md">Documentation</a>
         · <a href="https://github.com/ValTM/intellij-worktree-mcp/issues">Report an issue</a></p>
     ]]></description>
     <change-notes><![CDATA[
+        <p><b>1.0.2</b> — Support IntelliJ Platform 263 (2026.3), retaining compatibility with supported 262 builds.</p>
         <p><b>1.0.1</b> — Automated signed release publishing. Plugin functionality is unchanged from 1.0.0.</p>
         <p><b>1.0.0</b> — First stable release of project lifecycle and context-aware IDE action tools.</p>
         <p><b>0.5.1</b> — Allow IntelliJ Platform 262 patch updates while retaining the minimum supported build. Use platform-supported explicit action contexts for injected-language handling.</p>
