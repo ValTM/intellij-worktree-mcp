@@ -33,6 +33,39 @@ internal data class GitWorktree(
 )
 
 internal object GitWorktrees {
+    internal enum class RemovalBlockReason {
+        REPOSITORY_IDENTITY_UNKNOWN,
+        INVENTORY_UNKNOWN,
+        MAIN_WORKTREE,
+        BARE_REPOSITORY,
+        LOCKED,
+        PRUNABLE,
+        FOREIGN_WORKTREE,
+        TARGET_IDENTITY_UNKNOWN,
+        REPOSITORY_IDENTITY_MISMATCH,
+        STATUS_UNKNOWN,
+        HISTORY_UNKNOWN,
+        TRACKED_CHANGES,
+        UNTRACKED_FILES,
+        UNRETAINED_COMMITS,
+        OPEN_PROJECT,
+    }
+
+    internal data class RemovalPlan(
+        val repositoryDirectory: String,
+        val directory: String,
+        val head: String?,
+        val branch: String?,
+        val trackedChanges: List<String>,
+        val untrackedFiles: List<String>,
+        val unpushedCommits: Int?,
+        val historyKnown: Boolean,
+        val unsafeCommits: Int?,
+        val blockedReasons: List<String>,
+        val blockedCodes: List<RemovalBlockReason>,
+        val confirmation: String,
+    )
+
     internal data class CreationPlan(
         val repositoryDirectory: String,
         val directory: String,
@@ -123,6 +156,156 @@ internal object GitWorktrees {
         } catch (error: Exception) {
             throw CreationException(plan.directory, plan.branch, error)
         }
+    }
+
+    suspend fun previewRemove(repositoryDirectory: String, directory: String): RemovalPlan = withContext(Dispatchers.IO) {
+        val repository = repositoryPath(repositoryDirectory)
+        val supplied = Path.of(directory)
+        require(supplied.isAbsolute) { "Worktree directory must be absolute" }
+        val target = try {
+            supplied.toRealPath()
+        } catch (_: NoSuchFileException) {
+            supplied.normalize()
+        }
+        val blocked = mutableListOf<String>()
+        val blockedCodes = mutableListOf<RemovalBlockReason>()
+        fun block(code: RemovalBlockReason, reason: String) {
+            blockedCodes.add(code)
+            blocked.add(reason)
+        }
+        val state = mutableListOf(repository.toString(), target.toString())
+        suspend fun observe(
+            description: String,
+            failureCode: RemovalBlockReason,
+            captureState: Boolean = true,
+            operation: suspend () -> String,
+        ): String? = try {
+            operation().also { if (captureState) state.add(it) }
+        } catch (error: IOException) {
+            block(failureCode, "$description is unknown: ${error.message}")
+            null
+        }
+        val common = observe("Repository identity", RemovalBlockReason.REPOSITORY_IDENTITY_UNKNOWN) {
+            val path = Path.of(git(repository, "rev-parse", "--path-format=absolute", "--git-common-dir").removeSuffix("\n")).toRealPath()
+            state.add(Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()?.toString().orEmpty())
+            path.toString()
+        }
+        val inventory = observe("Worktree inventory", RemovalBlockReason.INVENTORY_UNKNOWN, captureState = false) {
+            git(repository, "worktree", "list", "--porcelain", "-z")
+        }
+        val entries = if (inventory == null) emptyList() else try {
+            parse(inventory)
+        } catch (error: IOException) {
+            block(RemovalBlockReason.INVENTORY_UNKNOWN, "Worktree inventory is unknown: ${error.message}")
+            emptyList()
+        }
+        val entry = entries.singleOrNull { it.directory == target.toString() }
+        // Other linked worktrees may be removed by this batch without changing this approval.
+        entry?.let {
+            state.addAll(listOf(it.head.orEmpty(), it.branch.orEmpty(), it.main.toString(), it.detached.toString(),
+                it.bare.toString(), it.locked?.let { reason -> "locked:$reason" }.orEmpty(),
+                it.prunable?.let { reason -> "prunable:$reason" }.orEmpty()))
+        }
+        if (entry == null) block(RemovalBlockReason.FOREIGN_WORKTREE, "Target is not a registered worktree of this repository")
+        if (entry?.main == true) block(RemovalBlockReason.MAIN_WORKTREE, "The main worktree cannot be removed")
+        if (entry?.bare == true) block(RemovalBlockReason.BARE_REPOSITORY, "Bare repositories cannot be removed")
+        if (entry?.locked != null) block(RemovalBlockReason.LOCKED, "Worktree is locked: ${entry.locked}")
+        if (entry?.prunable != null) block(RemovalBlockReason.PRUNABLE, "Worktree is prunable: ${entry.prunable}")
+        val tracked = mutableListOf<String>()
+        val untracked = mutableListOf<String>()
+        var unpushed: Int? = null
+        var unsafe: Int? = null
+        var historyKnown = false
+        if (entry != null && !entry.bare && entry.prunable == null) {
+            val targetCommon = observe("Target repository identity", RemovalBlockReason.TARGET_IDENTITY_UNKNOWN) {
+                state.add(Files.readAttributes(target, BasicFileAttributes::class.java).fileKey()?.toString().orEmpty())
+                Path.of(git(target, "rev-parse", "--path-format=absolute", "--git-common-dir").removeSuffix("\n")).toRealPath().toString()
+            }
+            if (targetCommon != common || common == null) {
+                block(RemovalBlockReason.REPOSITORY_IDENTITY_MISMATCH, "Target repository identity does not match the requested repository")
+            }
+            val status = observe("Worktree status", RemovalBlockReason.STATUS_UNKNOWN) {
+                git(target, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching")
+            }
+            if (status != null) {
+                val records = status.split('\u0000')
+                var index = 0
+                while (index < records.lastIndex) {
+                    val record = records[index++]
+                    if (record.length < 4 || record[2] != ' ') {
+                        block(RemovalBlockReason.STATUS_UNKNOWN, "Worktree status is unknown: malformed Git output")
+                        break
+                    }
+                    val code = record.substring(0, 2)
+                    val path = record.substring(3)
+                    if (code == "??" || code == "!!") untracked.add(path) else tracked.add(record)
+                    if ('R' in code || 'C' in code) {
+                        if (index >= records.lastIndex) {
+                            block(RemovalBlockReason.STATUS_UNKNOWN, "Worktree status is unknown: incomplete rename")
+                            break
+                        }
+                        tracked.add(records[index++])
+                    }
+                }
+                if (status.isNotEmpty() && !status.endsWith('\u0000')) {
+                    block(RemovalBlockReason.STATUS_UNKNOWN, "Worktree status is unknown: incomplete Git output")
+                }
+            }
+            if (tracked.isNotEmpty()) block(RemovalBlockReason.TRACKED_CHANGES, "Worktree has tracked changes")
+            if (untracked.isNotEmpty()) block(RemovalBlockReason.UNTRACKED_FILES, "Worktree has untracked or ignored files")
+            val history = observe("Commit history", RemovalBlockReason.HISTORY_UNKNOWN) {
+                val head = git(target, "rev-parse", "--verify", "HEAD^{commit}").trim()
+                val branch = git(target, "rev-parse", "--symbolic-full-name", "HEAD").trim()
+                if (head != entry.head || branch != (entry.branch?.let { "refs/heads/$it" } ?: "HEAD")) {
+                    throw IOException("HEAD or branch changed while inspecting the worktree")
+                }
+                state.add(head)
+                state.add(branch)
+                // Only persistent refs retain commits: another worktree's HEAD or a reflog does not.
+                val refs = git(repository, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(upstream)")
+                state.add(refs)
+                val refRecords = refs.lineSequence().filter { it.isNotEmpty() }.map { it.split('\u0000') }.toList()
+                val persistentRefs = refRecords.map { it.first() }.filter { ref ->
+                    !ref.startsWith("refs/bisect/") && !ref.startsWith("refs/worktree/") && !ref.startsWith("refs/rewritten/")
+                }
+                fun count(output: String): Int = output.trim().toIntOrNull()?.takeIf { it >= 0 }
+                    ?: throw IOException("Git returned an invalid commit count")
+                unsafe = count(git(target, "rev-list", "--count", "HEAD", "--not", *persistentRefs.toTypedArray(), "--"))
+                val branchRef = entry.branch?.let { "refs/heads/$it" }
+                val upstream = refRecords.firstOrNull { it.firstOrNull() == branchRef }
+                    ?.getOrNull(2)?.takeIf { it.isNotEmpty() }
+                unpushed = upstream?.let { count(git(target, "rev-list", "--count", "$it..HEAD", "--")) }
+                "${unsafe}:${unpushed}"
+            }
+            historyKnown = history != null
+            if (!historyKnown) {
+                unsafe = null
+                unpushed = null
+            } else if (unsafe != 0) {
+                block(RemovalBlockReason.UNRETAINED_COMMITS, "Worktree has $unsafe commits not retained by persistent refs")
+            }
+        }
+        state.addAll(blocked)
+        state.addAll(blockedCodes.map { it.name })
+        val digest = MessageDigest.getInstance("SHA-256")
+        state.forEach { value ->
+            val bytes = value.toByteArray(Charsets.UTF_8)
+            digest.update("${bytes.size}:".toByteArray(Charsets.UTF_8))
+            digest.update(bytes)
+        }
+        RemovalPlan(repository.toString(), target.toString(), entry?.head, entry?.branch, tracked, untracked,
+            unpushed, historyKnown, unsafe, blocked, blockedCodes, digest.digest().joinToString("") { "%02x".format(it) })
+    }
+
+    suspend fun remove(plan: RemovalPlan, confirmation: String): String = withContext(Dispatchers.IO) {
+        require(confirmation.isNotEmpty() && confirmation == plan.confirmation) { "Confirmation does not match the approved removal preview" }
+        require(plan.blockedCodes.isEmpty()) { "Removal is blocked: ${plan.blockedReasons.joinToString("; ")}" }
+        val current = previewRemove(plan.repositoryDirectory, plan.directory)
+        require(current == plan) { "Removal state changed; obtain and approve a new preview" }
+        require(current.blockedCodes.isEmpty() && current.historyKnown && current.unsafeCommits == 0) { "Removal safety could not be established" }
+        currentCoroutineContext().ensureActive()
+        git(Path.of(current.repositoryDirectory), "worktree", "remove", "--", current.directory)
+        current.directory
     }
 
     private fun repositoryPath(repositoryDirectory: String): Path {

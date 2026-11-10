@@ -225,6 +225,71 @@ class WorktreeTools : McpToolset {
     }
 
     @McpTool
+    @McpDescription("Preview removal of selected linked worktrees. Reports changes, retained-history checks and unknown upstream state. Main, locked, unsafe and open IDE projects are blocked. No files, projects or branches are changed.")
+    suspend fun worktree_remove_preview(
+        @McpDescription("Explicit absolute repository directory.") repositoryDirectory: String,
+        @McpDescription("Absolute worktree directories selected for removal.") directories: List<String>,
+    ): String {
+        val results = directories.map { directory ->
+            removalResult(directory) {
+                val plan = GitWorktrees.previewRemove(repositoryDirectory, directory)
+                val path = canonical(plan.directory)
+                val open = path != null && onEdt { overlapsOpenProject(path) }
+                gson.toJsonTree(plan).asJsonObject.apply {
+                    addProperty("open", open)
+                    if (open) {
+                        getAsJsonArray("blockedReasons").add("Project is open; close it separately using normal IDE safeguards")
+                        getAsJsonArray("blockedCodes").add(GitWorktrees.RemovalBlockReason.OPEN_PROJECT.name)
+                    }
+                    addProperty("status", if (open || plan.blockedReasons.isNotEmpty()) "blocked" else "preview")
+                }
+            }
+        }
+        return gson.toJson(mapOf("status" to "preview", "results" to results))
+    }
+
+    @McpTool
+    @McpDescription("Remove only explicitly approved linked worktrees, with one preview confirmation per directory. Revalidates each target immediately before removal. Open projects are skipped: close them separately through normal IDE save/process/veto safeguards. Never uses force or deletes branches. Returns an independent outcome for each target.")
+    suspend fun worktree_remove(
+        @McpDescription("Explicit repository directory used for the preview.") repositoryDirectory: String,
+        @McpDescription("Approved absolute worktree directories.") directories: List<String>,
+        @McpDescription("Preview confirmation tokens, in the same order as directories.") confirmations: List<String>,
+    ): String {
+        if (directories.size != confirmations.size) {
+            return encode(Outcome("invalid_request", reason = "Each directory requires its own preview confirmation"))
+        }
+        val results = directories.mapIndexed { index, directory ->
+            removalResult(directory) {
+                opening.withLock {
+                    val plan = GitWorktrees.previewRemove(repositoryDirectory, directory)
+                    val path = canonical(plan.directory)
+                    val open = path != null && onEdt { overlapsOpenProject(path) }
+                    if (open || plan.blockedReasons.isNotEmpty()) {
+                        gson.toJsonTree(mapOf(
+                            "directory" to plan.directory, "status" to "blocked",
+                            "blockedCodes" to if (open) plan.blockedCodes + GitWorktrees.RemovalBlockReason.OPEN_PROJECT else plan.blockedCodes,
+                            "reason" to if (open) "Project is open; close it separately using normal IDE safeguards"
+                                else plan.blockedReasons.joinToString("; "),
+                        )).asJsonObject
+                    } else {
+                        val removed = GitWorktrees.remove(plan, confirmations[index])
+                        gson.toJsonTree(mapOf("directory" to removed, "status" to "removed")).asJsonObject
+                    }
+                }
+            }
+        }
+        return gson.toJson(mapOf("status" to "completed", "results" to results))
+    }
+
+    private suspend fun removalResult(directory: String, block: suspend () -> com.google.gson.JsonObject): com.google.gson.JsonObject = try {
+        block()
+    } catch (error: IOException) {
+        gson.toJsonTree(Outcome("removal_failed", directory, reason = error.message)).asJsonObject
+    } catch (error: IllegalArgumentException) {
+        gson.toJsonTree(Outcome("blocked", directory, reason = error.message)).asJsonObject
+    }
+
+    @McpTool
     @McpDescription("Open an existing directory as an independent project, or reuse its canonical path. Merge is OFF by default. When requested, Merge All includes ALL eligible IDE project windows, not only this project and its target. Captures the previous last-active IDE window before opening; never attaches projects or bypasses trust prompts.")
     suspend fun worktree_open(
         @McpDescription("Existing absolute project directory.") directory: String,
@@ -526,6 +591,13 @@ class WorktreeTools : McpToolset {
         if (project == null || project.isDisposed) return null
         return WindowManager.getInstance().getFrame(project)?.let { Target(project, it) }
     }
+
+    private suspend fun overlapsOpenProject(path: Path): Boolean =
+        ProjectManager.getInstance().openProjects.any { project ->
+            project.basePath?.let { canonical(it) }?.let { base ->
+                base.startsWith(path) || path.startsWith(base)
+            } == true
+        }
 
     private suspend fun findProject(path: Path): Project? =
         ProjectManager.getInstance().openProjects.firstOrNull {

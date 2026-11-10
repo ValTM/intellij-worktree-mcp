@@ -52,5 +52,11 @@
                 description="Preview and confirm a new Git worktree, optionally opening an independent project">
             <add-to-group group-id="Git.MainMenu" anchor="last"/>
         </action>
+        <action id="Worktree.Remove"
+                class="local.worktree.WorktreeRemovalAction"
+                text="Remove Worktrees…"
+                description="Preview and confirm linked worktree removals, skipping open projects and retaining branches">
+            <add-to-group group-id="Git.MainMenu" anchor="last"/>
+        </action>
     </actions>
 </idea-plugin>
