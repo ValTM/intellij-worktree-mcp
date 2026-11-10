@@ -165,6 +165,66 @@ class WorktreeTools : McpToolset {
     }
 
     @McpTool
+    @McpDescription("Preview creation of a Git worktree without modifying Git or disk. Supply an explicit repository, destination, branch and starting ref. Returns the resolved plan and a confirmation token; show the plan to the user before applying it.")
+    suspend fun worktree_create_preview(
+        @McpDescription("Absolute selected repository directory.") repositoryDirectory: String,
+        @McpDescription("Absolute destination; must not already exist.") directory: String,
+        @McpDescription("Explicit local branch name.") branch: String,
+        @McpDescription("Starting commit/ref; for an existing branch it must resolve to that branch's tip.") startRef: String,
+        @McpDescription("Create a new branch rather than using an existing local branch.") newBranch: Boolean = false,
+    ): String = creationResult {
+        val plan = GitWorktrees.previewCreate(repositoryDirectory, directory, branch, startRef, newBranch)
+        val result = gson.toJsonTree(plan).asJsonObject
+        result.addProperty("status", "preview")
+        gson.toJson(result)
+    }
+
+    @McpTool
+    @McpDescription("Apply an explicitly approved worktree creation preview. Revalidates the destination, branch and starting commit against the confirmation token. Never overwrites a directory, resets a branch, runs installation commands or invokes Git hooks. Optional opening preserves normal IDE trust safeguards; a created worktree is retained if opening fails or is cancelled.")
+    suspend fun worktree_create(
+        @McpDescription("Absolute selected repository directory from the preview.") repositoryDirectory: String,
+        @McpDescription("Absolute destination from the approved preview.") directory: String,
+        @McpDescription("Local branch name from the approved preview.") branch: String,
+        @McpDescription("Starting ref from the approved preview.") startRef: String,
+        @McpDescription("Token returned by worktree_create_preview after the user approves that exact plan.") confirmation: String,
+        @McpDescription("Whether the approved plan creates a new branch.") newBranch: Boolean = false,
+        @McpDescription("Open the created directory as an independent IDE project.") open: Boolean = false,
+        @McpDescription("Explicit opt-in to merge ALL eligible IDE windows after opening.") merge: Boolean = false,
+        @McpDescription("Optional already-open target for the approved Merge All operation.") targetDirectory: String? = null,
+    ): String = creationResult {
+        require(open || (!merge && targetDirectory == null)) { "Window options require opening the created worktree" }
+        val plan = GitWorktrees.previewCreate(repositoryDirectory, directory, branch, startRef, newBranch)
+        val created = GitWorktrees.create(plan, confirmation)
+        if (!open) return@creationResult gson.toJson(mapOf("status" to "created", "directory" to created))
+        val opening = try {
+            gson.fromJson(worktree_open(created, merge, targetDirectory), com.google.gson.JsonObject::class.java)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            gson.toJsonTree(mapOf("status" to "open_failed", "reason" to error.message)).asJsonObject
+        }
+        val openStatus = opening["status"].asString
+        val opened = openStatus == "opened" || openStatus == "reused"
+        gson.toJson(mapOf(
+            "status" to if (opened) "created" else "created_open_failed",
+            "directory" to created, "opening" to opening,
+        ))
+    }
+
+    private suspend fun creationResult(block: suspend () -> String): String = try {
+        block()
+    } catch (error: GitWorktrees.CreationException) {
+        gson.toJson(mapOf(
+            "status" to "creation_incomplete", "directory" to error.directory,
+            "branch" to error.branch, "reason" to error.message,
+        ))
+    } catch (error: IOException) {
+        encode(Outcome("creation_failed", reason = error.message))
+    } catch (error: IllegalArgumentException) {
+        encode(Outcome("invalid_request", reason = error.message))
+    }
+
+    @McpTool
     @McpDescription("Open an existing directory as an independent project, or reuse its canonical path. Merge is OFF by default. When requested, Merge All includes ALL eligible IDE project windows, not only this project and its target. Captures the previous last-active IDE window before opening; never attaches projects or bypasses trust prompts.")
     suspend fun worktree_open(
         @McpDescription("Existing absolute project directory.") directory: String,

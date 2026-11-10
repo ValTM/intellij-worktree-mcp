@@ -2,7 +2,7 @@
 
 [![Build and release](https://github.com/ValTM/intellij-worktree-mcp/actions/workflows/build.yml/badge.svg)](https://github.com/ValTM/intellij-worktree-mcp/actions/workflows/build.yml)
 
-Manage independent IntelliJ Platform projects through the IDE's bundled MCP server: open or reuse a directory, close an exact project, merge macOS windows, and discover or run IDE actions. This plugin does **not** create or delete Git worktrees; create them with Git, then open their directories.
+Manage independent IntelliJ Platform projects through the IDE's bundled MCP server: discover and switch Git worktrees, preview and create a worktree, open or reuse a directory, close an exact project, merge macOS windows, and discover or run IDE actions. Worktree creation is also available from the Git menu and Find Action; it requires confirmation of the resolved destination, branch and starting commit.
 
 ## Compatibility
 

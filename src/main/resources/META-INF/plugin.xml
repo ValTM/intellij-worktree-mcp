@@ -46,5 +46,11 @@
                 description="Choose a Git repository, discover its worktrees, and open or focus a worktree project">
             <add-to-group group-id="Git.MainMenu" anchor="last"/>
         </action>
+        <action id="Worktree.Create"
+                class="local.worktree.WorktreeCreationAction"
+                text="Create Worktree…"
+                description="Preview and confirm a new Git worktree, optionally opening an independent project">
+            <add-to-group group-id="Git.MainMenu" anchor="last"/>
+        </action>
     </actions>
 </idea-plugin>
