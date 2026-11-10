@@ -1,0 +1,45 @@
+name: Issue link
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  pull-requests: read
+  issues: read
+
+jobs:
+  linked-issue:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require a real closing issue in this repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GraphQL variables are literal, not shell expansions.
+          # shellcheck disable=SC2016
+          gh api graphql --paginate --slurp \
+            -F owner="${GITHUB_REPOSITORY%/*}" \
+            -F name="${GITHUB_REPOSITORY#*/}" \
+            -F number="$PR_NUMBER" \
+            -f query='
+              query($owner:String!, $name:String!, $number:Int!, $endCursor:String) {
+                repository(owner:$owner, name:$name) {
+                  pullRequest(number:$number) {
+                    closingIssuesReferences(first:100, after:$endCursor) {
+                      nodes { repository { nameWithOwner } }
+                      pageInfo { hasNextPage endCursor }
+                    }
+                  }
+                }
+              }' > "$RUNNER_TEMP/linked-issues.json"
+          jq -e --arg repo "$GITHUB_REPOSITORY" \
+            'any(.[].data.repository.pullRequest.closingIssuesReferences.nodes[];
+                 .repository.nameWithOwner == $repo)' \
+            "$RUNNER_TEMP/linked-issues.json" ||
+            { echo '::error::Link a real issue in this repository, for example: Closes #20'; exit 1; }
