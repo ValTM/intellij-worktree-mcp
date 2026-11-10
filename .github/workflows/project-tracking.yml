@@ -1,59 +1,45 @@
-name: Project tracking
+name: Issue link
 
 on:
-  pull_request_target:
+  pull_request:
     branches: [main]
-    types: [opened, edited, synchronize, reopened, closed, ready_for_review, converted_to_draft]
-  issues:
-    types: [opened, edited, reopened, closed, labeled, unlabeled, transferred, deleted]
-  schedule:
-    # Personal Project changes have no repository Actions event. Reconcile periodically.
-    - cron: '*/5 * * * *'
-  workflow_dispatch:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
 
 permissions:
-  contents: read
   pull-requests: read
   issues: read
 
 jobs:
-  enroll:
-    if: github.event_name == 'issues' && github.event.action == 'opened'
+  linked-issue:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: main
-          persist-credentials: false
-      - name: Enroll new issue
+      - name: Require a real closing issue in this repository
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
-        run: python3 .github/scripts/project_tracking.py --enroll-only
-
-  reconcile:
-    needs: enroll
-    if: always()
-    # Coalesce reconciliation only; never drop an individual enrollment event.
-    concurrency:
-      group: project-tracking
-      cancel-in-progress: false
-    permissions:
-      contents: read
-      pull-requests: read
-      issues: read
-      checks: write
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      # Only the protected default branch is trusted, even for fork PR events.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: main
-          persist-credentials: false
-      - name: Reconcile issue, project and PR metadata
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
-        run: python3 .github/scripts/project_tracking.py
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GraphQL variables are literal, not shell expansions.
+          # shellcheck disable=SC2016
+          gh api graphql --paginate --slurp \
+            -F owner="${GITHUB_REPOSITORY%/*}" \
+            -F name="${GITHUB_REPOSITORY#*/}" \
+            -F number="$PR_NUMBER" \
+            -f query='
+              query($owner:String!, $name:String!, $number:Int!, $endCursor:String) {
+                repository(owner:$owner, name:$name) {
+                  pullRequest(number:$number) {
+                    closingIssuesReferences(first:100, after:$endCursor) {
+                      nodes { repository { nameWithOwner } }
+                      pageInfo { hasNextPage endCursor }
+                    }
+                  }
+                }
+              }' > "$RUNNER_TEMP/linked-issues.json"
+          jq -e --arg repo "$GITHUB_REPOSITORY" \
+            'any(.[].data.repository.pullRequest.closingIssuesReferences.nodes[];
+                 .repository.nameWithOwner == $repo)' \
+            "$RUNNER_TEMP/linked-issues.json" ||
+            { echo '::error::Link a real issue in this repository, for example: Closes #20'; exit 1; }
