@@ -14,3 +14,7 @@ build test sandbox compatibility sign:
 	@test -n "$(GRADLE)" && test -x "$(GRADLE)" || { echo 'Set GRADLE to a Gradle 9.3.1 executable.' >&2; exit 1; }
 	@test -x "$(JBR)/bin/java" || { echo 'Set JBR to the bundled JetBrains Runtime home.' >&2; exit 1; }
 	JAVA_HOME="$(JBR)" "$(GRADLE)" --no-daemon -PwebstormPath="$(WEBSTORM)" $(TASK)
+
+.PHONY: tracking-checks
+tracking-checks:
+	python3 -B -m unittest discover -s .github/scripts -p 'test_*.py'
