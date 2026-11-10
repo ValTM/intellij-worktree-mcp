@@ -20,6 +20,8 @@ dependencies {
     intellijPlatform {
         local(webstormPath)
         bundledPlugin("com.intellij.mcpServer")
+        bundledPlugin("Git4Idea")
+        bundledModule("intellij.platform.vcs")
         pluginVerifier()
         testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform)
     }

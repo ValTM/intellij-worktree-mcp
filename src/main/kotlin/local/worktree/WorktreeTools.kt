@@ -112,6 +112,59 @@ class WorktreeTools : McpToolset {
     }
 
     @McpTool
+    @McpDescription("Discover all Git worktrees of an explicitly selected repository, including unopened and prunable worktrees. Reports canonical paths and IDE open/current state without selecting a window. Git failures return unavailable, never an empty successful inventory.")
+    suspend fun worktree_discover(
+        @McpDescription("Absolute directory of the explicitly selected Git repository.") repositoryDirectory: String,
+    ): String = inventoryResult {
+        val entries = GitWorktrees.discover(repositoryDirectory)
+        val current = onEdt { lastTarget()?.project }
+        val worktrees = entries.map { entry ->
+            val path = canonical(entry.directory)
+            val project = if (path == null) null else onEdt { findProject(path) }
+            mapOf(
+                "directory" to entry.directory, "head" to entry.head, "branch" to entry.branch,
+                "main" to entry.main, "detached" to entry.detached, "bare" to entry.bare,
+                "locked" to entry.locked, "prunable" to entry.prunable,
+                "open" to (project != null), "current" to (project != null && project === current),
+            )
+        }
+        gson.toJson(mapOf("status" to "ok", "worktrees" to worktrees))
+    }
+
+    @McpTool
+    @McpDescription("Explicitly switch to a worktree belonging to the selected repository. Reuses an already-open project or opens an independent project with normal trust safeguards, then selects its window. Does not merge windows.")
+    suspend fun worktree_switch(
+        @McpDescription("Absolute directory of the explicitly selected Git repository.") repositoryDirectory: String,
+        @McpDescription("Absolute worktree directory to open or select.") directory: String,
+    ): String = inventoryResult {
+        val path = canonical(directory) ?: return@inventoryResult encode(Outcome("invalid_directory", directory))
+        val entries = GitWorktrees.discover(repositoryDirectory)
+        val entry = entries.firstOrNull { canonical(it.directory) == path }
+            ?: return@inventoryResult encode(Outcome("not_in_repository", path.toString()))
+        if (entry.bare) return@inventoryResult encode(Outcome("bare_repository", path.toString()))
+        val opened = worktree_open(path.toString())
+        val status = gson.fromJson(opened, com.google.gson.JsonObject::class.java)["status"].asString
+        if (status != "opened" && status != "reused") return@inventoryResult opened
+        onEdt {
+            val project = findProject(path)
+                ?: return@onEdt encode(Outcome("target_unavailable", path.toString()))
+            val frame = WindowManager.getInstance().getFrame(project)
+                ?: return@onEdt encode(Outcome("target_unavailable", path.toString()))
+            frame.toFront()
+            frame.requestFocus()
+            encode(Outcome("switched", path.toString()))
+        }
+    }
+
+    private suspend fun inventoryResult(block: suspend () -> String): String = try {
+        block()
+    } catch (error: IOException) {
+        encode(Outcome("unavailable", reason = error.message))
+    } catch (error: IllegalArgumentException) {
+        encode(Outcome("invalid_directory", reason = error.message))
+    }
+
+    @McpTool
     @McpDescription("Open an existing directory as an independent project, or reuse its canonical path. Merge is OFF by default. When requested, Merge All includes ALL eligible IDE project windows, not only this project and its target. Captures the previous last-active IDE window before opening; never attaches projects or bypasses trust prompts.")
     suspend fun worktree_open(
         @McpDescription("Existing absolute project directory.") directory: String,

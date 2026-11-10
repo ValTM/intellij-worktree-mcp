@@ -6,7 +6,7 @@ Manage independent IntelliJ Platform projects through the IDE's bundled MCP serv
 
 ## Compatibility
 
-Requires IntelliJ Platform **262.10968.77 through 263.\*** and the bundled MCP Server. Platform tests, Plugin Verifier, and interactive MCP scenarios pass against WebStorm 2026.2.4 (262.11879.105), DataGrip 2026.2.6.1 (262.11879.103), and PyCharm 2026.2.4 (262.11879.98). Runtime checks use isolated macOS sandboxes and cover background-file formatting, ownership checks, project lifecycle, and native window merging; additional checks cover SQL formatting in DataGrip and Python formatting in PyCharm.
+Requires IntelliJ Platform **262.10968.77 through 263.\***, the bundled MCP Server, and Git integration (`Git4Idea`). Platform tests, Plugin Verifier, and interactive MCP scenarios pass against WebStorm 2026.2.4 (262.11879.105), DataGrip 2026.2.6.1 (262.11879.103), and PyCharm 2026.2.4 (262.11879.98). Runtime checks use isolated macOS sandboxes and cover background-file formatting, ownership checks, project lifecycle, and native window merging; additional checks cover SQL formatting in DataGrip and Python formatting in PyCharm.
 
 Window merging is macOS-only and uses the IDE's native Merge All Windows action. Fullscreen/Spaces behavior is best-effort: later IDE restoration can change selection or geometry after a successful response. Linux CI checks compilation, platform tests and binary compatibility, not macOS window behavior.
 
@@ -42,7 +42,7 @@ Trust and other IDE prompts remain interactive. After a mutation timeout, inspec
 
 ## Build and checks
 
-Requirements: **Gradle 9.3.1**, an IDE in the supported **262–263** build range with the bundled MCP Server, and its bundled **JBR/JDK 25**. CI uses WebStorm 2026.2.3 as the minimum baseline. The Makefile defaults to `~/Applications/WebStorm.app` and a locally cached Gradle distribution. Override paths when necessary:
+Requirements: **Gradle 9.3.1**, an IDE in the supported **262–263** build range with the bundled MCP Server and Git integration (`Git4Idea`), and its bundled **JBR/JDK 25**. CI uses WebStorm 2026.2.3 as the minimum baseline. The Makefile defaults to `~/Applications/WebStorm.app` and a locally cached Gradle distribution. Override paths when necessary:
 
 ```sh
 make build test compatibility \
