@@ -2,13 +2,15 @@
 
 [![Build and release](https://github.com/ValTM/intellij-worktree-mcp/actions/workflows/build.yml/badge.svg)](https://github.com/ValTM/intellij-worktree-mcp/actions/workflows/build.yml)
 
-Manage independent IntelliJ Platform projects through the IDE's bundled MCP server: discover and switch Git worktrees, preview and confirm creation or removal, open or reuse a directory, close an exact project, merge macOS windows, and discover or run IDE actions. Manual worktree creation, discovery, opening and removal remain owned by the IDE's native Worktrees UI.
+Manage independent IntelliJ Platform projects through the IDE's bundled MCP server: discover and switch Git worktrees, preview and create a worktree, open or reuse a directory, close an exact project, merge macOS windows, and discover or run IDE actions. For manual work, use the IDE's native Worktrees panel. On macOS, this plugin adds **Open and Merge…** to its toolbar and context menu (**Merge…** for an already-open project). Merging requires confirmation covering **all eligible project windows**, including unrelated projects, then selects the chosen worktree's tab. If that project already shares the invoking project's window group, the action only activates its tab, without confirmation or merging other windows.
 
 ## Compatibility
 
 Requires IntelliJ Platform **262.10968.77 through 263.\***, the bundled MCP Server, and Git integration (`Git4Idea`). Platform tests, Plugin Verifier, and interactive MCP scenarios pass against WebStorm 2026.2.4 (262.11879.105), DataGrip 2026.2.6.1 (262.11879.103), and PyCharm 2026.2.4 (262.11879.98). Runtime checks use isolated macOS sandboxes and cover background-file formatting, ownership checks, project lifecycle, and native window merging; additional checks cover SQL formatting in DataGrip and Python formatting in PyCharm.
 
 Window merging is macOS-only and uses the IDE's native Merge All Windows action. Fullscreen/Spaces behavior is best-effort: later IDE restoration can change selection or geometry after a successful response. Linux CI checks compilation, platform tests and binary compatibility, not macOS window behavior.
+
+Native creation, discovery, opening and removal remain owned by the IDE. To merge after creation, select the worktree and use **Open and Merge…**; native Create does not automatically merge. Native multi-repository Worktrees UI requires platform 263; on 262, use MCP tools for multi-repository projects.
 
 ## Install
 

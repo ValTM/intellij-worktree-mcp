@@ -11,8 +11,11 @@
             <li>Optionally merge all eligible macOS project windows into native tabs.</li>
             <li>Find IDE actions by name or ID, inspect availability, and run an exact action.</li>
             <li>Discover and switch Git worktrees; preview and confirm safe worktree creation and removal through MCP.</li>
+            <li>Open a selected Git worktree and merge all windows from the IDE's native Worktrees panel.</li>
         </ul>
-        <p>Requires the bundled MCP Server and a connected MCP client.
+        <p>Lifecycle tools require the bundled MCP Server and a connected MCP client.
+        The native Worktrees panel's Open and Merge action also works directly inside the IDE on macOS.</p>
+        <p>
         Supports IntelliJ Platform builds 262.10968.77 through 263.*.
         Actions use project/window context or an explicitly requested, already-open text editor in that project.
         macOS fullscreen and Spaces merging is best-effort.</p>
@@ -37,4 +40,14 @@
     <extensions defaultExtensionNs="com.intellij">
         <mcpServer.mcpToolset implementation="local.worktree.WorktreeTools"/>
     </extensions>
+    <actions>
+        <action id="Worktree.OpenAndMerge"
+                class="local.worktree.OpenAndMergeWorktreeAction"
+                text="Open and Merge…"
+                description="Open the selected worktree and merge ALL eligible project windows, including unrelated projects"
+                icon="AllIcons.Actions.MoveToWindow">
+            <add-to-group group-id="Git.WorkingTrees.ToolwindowGroup.Popup" anchor="after" relative-to-action="Git.WorkingTrees.Open"/>
+            <add-to-group group-id="Git.WorkingTrees.ToolwindowGroup.Toolbar" anchor="last"/>
+        </action>
+    </actions>
 </idea-plugin>

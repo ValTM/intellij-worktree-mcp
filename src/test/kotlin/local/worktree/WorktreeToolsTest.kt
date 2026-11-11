@@ -4,6 +4,7 @@ import com.google.gson.JsonParser
 import com.intellij.ide.impl.HeadlessDataManager
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
+import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.actionSystem.PlatformCoreDataKeys
 import com.intellij.openapi.application.EDT
 import com.intellij.openapi.application.readAction
@@ -14,6 +15,8 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.project.VetoableProjectManagerListener
 import com.intellij.testFramework.HeavyPlatformTestCase
+import com.intellij.openapi.util.SystemInfoRt
+import git4idea.GitWorkingTree
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.testFramework.PsiTestUtil
 import kotlinx.coroutines.Dispatchers
@@ -26,6 +29,28 @@ class WorktreeToolsTest : HeavyPlatformTestCase() {
     override fun runInDispatchThread(): Boolean = false
     override fun isCreateDirectoryBasedProject(): Boolean = true
 
+
+    fun testOpenAndMergeRequiresOneUsableWorktree() {
+        val action = OpenAndMergeWorktreeAction()
+        val worktree = GitWorkingTree(project.basePath!!, "branch", false, false, false, false, "abc")
+        val prunable = GitWorkingTree(project.basePath!!, "branch", false, false, false, true, "abc")
+        for ((selection, enabled) in listOf(
+            emptyList<GitWorkingTree>() to false,
+            listOf(worktree) to SystemInfoRt.isMac,
+            listOf(worktree, prunable) to false,
+            listOf(prunable) to false,
+        )) {
+            val event = AnActionEvent.createFromDataContext("test", null, DataContext { key ->
+                when (key) {
+                    CommonDataKeys.PROJECT.name -> project
+                    "SELECTED_GIT_WORKING_TREE_IN_WORKING_TREE_TAB" -> selection
+                    else -> null
+                }
+            })
+            action.update(event)
+            assertEquals(enabled, event.presentation.isEnabled)
+        }
+    }
     fun testCloseVetoLeavesProjectOpen() = runBlocking {
         Files.createDirectories(Path.of(project.basePath!!))
         val manager = ProjectManager.getInstance()
