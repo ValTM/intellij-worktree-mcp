@@ -333,7 +333,7 @@ internal object GitWorktrees {
         return destination
     }
 
-    private suspend fun git(repository: Path, vararg arguments: String): String {
+    internal suspend fun git(repository: Path, vararg arguments: String): String {
         currentCoroutineContext().ensureActive()
         val command = GeneralCommandLine(GitExecutableManager.getInstance().pathToGit)
             .withParameters("-C", repository.toString(), "-c", "core.hooksPath=/dev/null")

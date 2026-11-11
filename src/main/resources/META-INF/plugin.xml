@@ -12,9 +12,11 @@
             <li>Find IDE actions by name or ID, inspect availability, and run an exact action.</li>
             <li>Discover and switch Git worktrees; preview and confirm safe worktree creation and removal through MCP.</li>
             <li>Open a selected Git worktree and merge all windows from the IDE's native Worktrees panel.</li>
+            <li>Use the permanent Worktree Lifecycle Git tab for inline sync/review status, safe creation/removal previews and proven merged-worktree cleanup.</li>
         </ul>
-        <p>Lifecycle tools require the bundled MCP Server and a connected MCP client.
-        The native Worktrees panel's Open and Merge action also works directly inside the IDE on macOS.</p>
+        <p>MCP tools require the bundled MCP Server and a connected MCP client.
+        The Worktree Lifecycle tab and native Worktrees actions also work directly inside the IDE;
+        window merging is available on macOS.</p>
         <p>
         Supports IntelliJ Platform builds 263.7307.202 through 263.*.
         Actions use project/window context or an explicitly requested, already-open text editor in that project.
@@ -23,6 +25,7 @@
         · <a href="https://github.com/ValTM/intellij-worktree-mcp/issues">Report an issue</a></p>
     ]]></description>
     <change-notes><![CDATA[
+        <p><b>Unreleased</b> — Permanent Worktree Lifecycle Git tab with repository selection, inline status and refresh, native project/review operations, and safe merged cleanup. The native Working Trees tab is preserved.</p>
         <p><b>1.0.3</b> — Requires IntelliJ Platform 263.7307.202 or later within 263.*.</p>
         <p><b>1.0.2</b> — Support IntelliJ Platform 263 (2026.3), retaining compatibility with supported 262 builds.</p>
         <p><b>1.0.1</b> — Automated signed release publishing. Plugin functionality is unchanged from 1.0.0.</p>
@@ -37,11 +40,27 @@
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.mcpServer</depends>
     <depends>Git4Idea</depends>
+    <depends optional="true" config-file="worktree-github.xml">org.jetbrains.plugins.github</depends>
     <depends>com.intellij.platform.vcs</depends>
     <extensions defaultExtensionNs="com.intellij">
         <mcpServer.mcpToolset implementation="local.worktree.WorktreeTools"/>
+        <changesViewContent id="worktree.lifecycle"
+                            tabName="Worktree Lifecycle"
+                            className="local.worktree.WorktreeLifecycleContentProvider"
+                            predicateClassName="local.worktree.WorktreeLifecycleVisibility"
+                            preloaderClassName="local.worktree.WorktreeLifecyclePreloader"
+                            isInCommitToolWindow="false"/>
     </extensions>
     <actions>
+        <action id="Worktree.ShowLifecycle"
+                class="local.worktree.ShowWorktreeLifecycleAction"
+                text="Worktree Lifecycle"
+                description="Show the permanent Worktree Lifecycle tab in Git"
+                icon="/icons/worktreeLifecycle.svg">
+            <add-to-group group-id="Git.MainMenu" anchor="after" relative-to-action="Git.Show.WorkingTrees"/>
+            <add-to-group group-id="Git.WorkingTrees.ToolwindowGroup.Toolbar" anchor="last"/>
+            <add-to-group group-id="Vcs.Log.ToolWindow.TabActions.DropDown" anchor="last"/>
+        </action>
         <action id="Worktree.OpenAndMerge"
                 class="local.worktree.OpenAndMergeWorktreeAction"
                 text="Open and Merge…"
