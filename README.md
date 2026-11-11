@@ -2,11 +2,11 @@
 
 [![Build and release](https://github.com/ValTM/intellij-worktree-mcp/actions/workflows/build.yml/badge.svg)](https://github.com/ValTM/intellij-worktree-mcp/actions/workflows/build.yml)
 
-Manage independent IntelliJ Platform projects through the IDE's bundled MCP server: open or reuse a directory, close an exact project, merge macOS windows, and discover or run IDE actions. This plugin does **not** create or delete Git worktrees; create them with Git, then open their directories.
+Manage independent IntelliJ Platform projects through the IDE's bundled MCP server: discover and switch Git worktrees, preview and confirm creation or removal, open or reuse a directory, close an exact project, merge macOS windows, and discover or run IDE actions. Manual worktree creation, discovery, opening and removal remain owned by the IDE's native Worktrees UI.
 
 ## Compatibility
 
-Requires IntelliJ Platform **262.10968.77 through 263.\*** and the bundled MCP Server. Platform tests, Plugin Verifier, and interactive MCP scenarios pass against WebStorm 2026.2.4 (262.11879.105), DataGrip 2026.2.6.1 (262.11879.103), and PyCharm 2026.2.4 (262.11879.98). Runtime checks use isolated macOS sandboxes and cover background-file formatting, ownership checks, project lifecycle, and native window merging; additional checks cover SQL formatting in DataGrip and Python formatting in PyCharm.
+Requires IntelliJ Platform **262.10968.77 through 263.\***, the bundled MCP Server, and Git integration (`Git4Idea`). Platform tests, Plugin Verifier, and interactive MCP scenarios pass against WebStorm 2026.2.4 (262.11879.105), DataGrip 2026.2.6.1 (262.11879.103), and PyCharm 2026.2.4 (262.11879.98). Runtime checks use isolated macOS sandboxes and cover background-file formatting, ownership checks, project lifecycle, and native window merging; additional checks cover SQL formatting in DataGrip and Python formatting in PyCharm.
 
 Window merging is macOS-only and uses the IDE's native Merge All Windows action. Fullscreen/Spaces behavior is best-effort: later IDE restoration can change selection or geometry after a successful response. Linux CI checks compilation, platform tests and binary compatibility, not macOS window behavior.
 
@@ -26,11 +26,19 @@ The optional [agent skill](skills/intellij-worktree/SKILL.md) describes lifecycl
 | Tool | Purpose |
 | --- | --- |
 | `worktree_status()` | List open projects, window state and last-active project. |
+| `worktree_discover(repositoryDirectory)` | Discover worktrees of an explicitly selected repository, including unopened and prunable entries. |
+| `worktree_switch(repositoryDirectory, directory)` | Open or select a worktree belonging to that repository, without merging windows. |
+| `worktree_create_preview(repositoryDirectory, directory, branch, startRef, newBranch=false)` | Preview the exact creation plan and obtain its confirmation token without changing disk or Git. |
+| `worktree_create(repositoryDirectory, directory, branch, startRef, confirmation, newBranch=false, open=false, merge=false, targetDirectory?)` | Revalidate and apply an approved creation plan; optionally open and explicitly merge windows. |
+| `worktree_remove_preview(repositoryDirectory, directories)` | Preview selected linked worktrees, reporting changes, retained history, upstream uncertainty and blocked targets. |
+| `worktree_remove(repositoryDirectory, directories, confirmations)` | Revalidate and remove approved linked worktrees independently, without force or branch deletion. |
 | `worktree_open(directory, merge=false, targetDirectory?)` | Open or reuse a canonical directory without duplicate projects; optionally merge in the same call. |
 | `worktree_close(directory)` | Close exactly that project, retaining normal save/process/veto safeguards. |
 | `worktree_merge(targetDirectory?)` | Merge **all eligible windows**, not just a selected pair. Defaults to the captured last-active project. |
 | `worktree_search_actions(query, directory, limit=50, filePath?)` | Find action IDs by case-insensitive name/ID substring; return names and availability. Limit: 1–100; groups excluded. |
 | `worktree_action(actionId, directory, filePath?)` | Dispatch an exact registered action in that project's window or explicitly requested editor context. |
+
+Show creation and removal previews to the user before applying their exact confirmation tokens. Creation rejects existing destinations and changed plans; a created worktree remains if optional opening fails. Removal blocks main, locked, unsafe and open-project targets, retains branches, and never closes projects implicitly. Close an authorized project separately through normal IDE safeguards before obtaining a fresh removal preview.
 
 The host's `projectPath` argument routes a call through an **already-open** project. It is distinct from the `directory` being opened and from `targetDirectory`. Use canonical absolute paths and the schemas exposed by your client.
 

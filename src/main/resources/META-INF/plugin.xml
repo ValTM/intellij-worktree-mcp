@@ -10,6 +10,7 @@
             <li>Open or reuse a project; close an exact project with normal IDE safeguards.</li>
             <li>Optionally merge all eligible macOS project windows into native tabs.</li>
             <li>Find IDE actions by name or ID, inspect availability, and run an exact action.</li>
+            <li>Discover and switch Git worktrees; preview and confirm safe worktree creation and removal through MCP.</li>
         </ul>
         <p>Requires the bundled MCP Server and a connected MCP client.
         Supports IntelliJ Platform builds 262.10968.77 through 263.*.
@@ -31,6 +32,8 @@
     ]]></change-notes>
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.mcpServer</depends>
+    <depends>Git4Idea</depends>
+    <depends>com.intellij.platform.vcs</depends>
     <extensions defaultExtensionNs="com.intellij">
         <mcpServer.mcpToolset implementation="local.worktree.WorktreeTools"/>
     </extensions>
