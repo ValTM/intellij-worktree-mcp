@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "local.worktree"
-version = "1.0.2"
+version = "1.0.3"
 
 val webstormPath = providers.gradleProperty("webstormPath")
     .orElse("${System.getProperty("user.home")}/Applications/WebStorm.app")
@@ -22,6 +22,8 @@ dependencies {
         bundledPlugin("com.intellij.mcpServer")
         bundledPlugin("Git4Idea")
         bundledModule("intellij.platform.vcs")
+        bundledModule("intellij.platform.vcs.dvcs")
+        bundledModule("intellij.platform.vcs.dvcs.impl")
         pluginVerifier()
         testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform)
     }
@@ -44,7 +46,7 @@ intellijPlatform {
     sandboxContainer = layout.buildDirectory.dir("sandbox")
     pluginConfiguration {
         ideaVersion {
-            sinceBuild = "262.10968.77"
+            sinceBuild = "263.7307.202"
             untilBuild = "263.*"
         }
     }

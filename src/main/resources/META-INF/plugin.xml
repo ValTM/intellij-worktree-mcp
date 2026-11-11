@@ -16,13 +16,14 @@
         <p>Lifecycle tools require the bundled MCP Server and a connected MCP client.
         The native Worktrees panel's Open and Merge action also works directly inside the IDE on macOS.</p>
         <p>
-        Supports IntelliJ Platform builds 262.10968.77 through 263.*.
+        Supports IntelliJ Platform builds 263.7307.202 through 263.*.
         Actions use project/window context or an explicitly requested, already-open text editor in that project.
         macOS fullscreen and Spaces merging is best-effort.</p>
         <p><a href="https://github.com/ValTM/intellij-worktree-mcp/blob/main/README.md">Documentation</a>
         · <a href="https://github.com/ValTM/intellij-worktree-mcp/issues">Report an issue</a></p>
     ]]></description>
     <change-notes><![CDATA[
+        <p><b>1.0.3</b> — Requires IntelliJ Platform 263.7307.202 or later within 263.*.</p>
         <p><b>1.0.2</b> — Support IntelliJ Platform 263 (2026.3), retaining compatibility with supported 262 builds.</p>
         <p><b>1.0.1</b> — Automated signed release publishing. Plugin functionality is unchanged from 1.0.0.</p>
         <p><b>1.0.0</b> — First stable release of project lifecycle and context-aware IDE action tools.</p>
@@ -48,6 +49,18 @@
                 icon="AllIcons.Actions.MoveToWindow">
             <add-to-group group-id="Git.WorkingTrees.ToolwindowGroup.Popup" anchor="after" relative-to-action="Git.WorkingTrees.Open"/>
             <add-to-group group-id="Git.WorkingTrees.ToolwindowGroup.Toolbar" anchor="last"/>
+        </action>
+        <action id="Worktree.OpenReview"
+                class="local.worktree.OpenReviewInWorktreeAction"
+                text="Open Review in Worktree"
+                description="Open the selected worktree and its review in that project">
+            <add-to-group group-id="Git.WorkingTrees.ToolwindowGroup.Popup" anchor="last"/>
+        </action>
+        <action id="Worktree.OpenReviewAndMerge"
+                class="local.worktree.OpenReviewInWorktreeAndMergeAction"
+                text="Open Review in Worktree and Merge…"
+                description="Open the selected worktree and its review, merging ALL eligible project windows">
+            <add-to-group group-id="Git.WorkingTrees.ToolwindowGroup.Popup" anchor="last"/>
         </action>
     </actions>
 </idea-plugin>
