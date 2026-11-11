@@ -21,6 +21,7 @@ dependencies {
         local(webstormPath)
         bundledPlugin("com.intellij.mcpServer")
         bundledPlugin("Git4Idea")
+        bundledPlugin("org.jetbrains.plugins.github")
         bundledModule("intellij.platform.vcs")
         bundledModule("intellij.platform.vcs.dvcs")
         bundledModule("intellij.platform.vcs.dvcs.impl")

@@ -2,7 +2,7 @@
 
 [![Build and release](https://github.com/ValTM/intellij-worktree-mcp/actions/workflows/build.yml/badge.svg)](https://github.com/ValTM/intellij-worktree-mcp/actions/workflows/build.yml)
 
-Manage independent IntelliJ Platform projects through the IDE's bundled MCP server: discover and switch Git worktrees, preview and create a worktree, open or reuse a directory, close an exact project, merge macOS windows, and discover or run IDE actions. For manual work, use the IDE's native Worktrees panel. On macOS, this plugin adds **Open and Merge…** to its toolbar and context menu (**Merge…** for an already-open project). Merging requires confirmation covering **all eligible project windows**, including unrelated projects, then selects the chosen worktree's tab. If that project already shares the invoking project's window group, the action only activates its tab, without confirmation or merging other windows.
+Manage independent IntelliJ Platform projects through the IDE's bundled MCP server: discover and switch Git worktrees, preview and create a worktree, open or reuse a directory, close an exact project, merge macOS windows, and discover or run IDE actions. For manual work, use **Git → Worktree Lifecycle**, a permanent tab with repository selection, inline sync/review/state details, Refresh, creation and removal previews, and selectable merged-worktree cleanup. Refresh fetches remotes; GitHub review status uses the IDE's signed-in accounts. Missing or uncertain merge proof blocks cleanup, and branches are never deleted.
 
 ## Compatibility
 
@@ -10,7 +10,7 @@ Requires IntelliJ Platform **263.7307.202 through 263.\***, the bundled MCP Serv
 
 Window merging is macOS-only and uses the IDE's native Merge All Windows action. Fullscreen/Spaces behavior is best-effort: later IDE restoration can change selection or geometry after a successful response. Linux CI checks compilation, platform tests and binary compatibility, not macOS window behavior.
 
-Native creation, discovery, opening and removal remain owned by the IDE. To merge after creation, select the worktree and use **Open and Merge…**; native Create does not automatically merge.
+The IDE's native **Worktrees** panel remains available, including this plugin's macOS **Open and Merge…** action (**Merge…** for an already-open project). Merging requires confirmation covering **all eligible project windows**, including unrelated projects. If the selected project already shares the invoking project's window group, this action only activates its tab. Creation does not automatically merge windows.
 
 ## Install
 
