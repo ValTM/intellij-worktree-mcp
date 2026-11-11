@@ -409,6 +409,19 @@ class WorktreeTools : McpToolset {
         ))
     }
 
+    internal suspend fun shareWindowGroup(first: Project, second: Project): Boolean {
+        if (first === second) return true
+        val frames = onEdt { target(first) to target(second) }
+        val left = frames.first ?: return false
+        val right = frames.second ?: return false
+        return native {
+            if (!left.available() || !right.available()) return@native false
+            val group = Foundation.invoke(MacUtil.getWindowFromJavaWindow(left.frame), "tabGroup")
+            group.toLong() != 0L &&
+                Foundation.invoke(MacUtil.getWindowFromJavaWindow(right.frame), "tabGroup") == group
+        }
+    }
+
     private suspend fun merge(target: Target): Outcome {
         if (!SystemInfoRt.isMac) return Outcome("unsupported_platform")
         val windows = onEdt {
