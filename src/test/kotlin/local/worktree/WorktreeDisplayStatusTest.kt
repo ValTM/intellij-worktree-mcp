@@ -105,43 +105,166 @@ class WorktreeDisplayStatusTest : HeavyPlatformTestCase() {
         assertTrue(incomplete.details.contains("Refresh"))
     }
 
-    fun testMergeCoverageRequiresExactSourceAndMergeRetainedInUnchangedTargetRemote() = runBlocking {
+    fun testSquashCoverageUsesHistoricalSameRepositoryProofAndOlderSourceButNeverLaterCommits() = runBlocking {
         val repository = initialize()
         git(repository, "checkout", "-b", "feature")
+        commit(repository, "older feature")
+        val older = git(repository, "rev-parse", "HEAD").trim()
         commit(repository, "source feature")
         val source = git(repository, "rev-parse", "HEAD").trim()
         git(repository, "checkout", "main")
         commit(repository, "squashed feature")
         val merged = git(repository, "rev-parse", "HEAD").trim()
-        // A squash target has no source commit ancestry; GitHub's exact source proof bridges it.
-        assertFalse(git(repository, "merge-base", source, merged).trim() == source)
+        assertFalse(WorktreeCleanup.ancestor(repository, source, merged))
         git(repository, "checkout", "feature")
-        val remoteUrl = temporary.resolve("remote").toString()
+        val remoteUrl = "git@github.com:owner/repo.git"
         git(repository, "remote", "add", "origin", remoteUrl)
         val proof = WorktreeMergeProof(source, merged, "owner/repo", "main", "origin", remoteUrl)
-        suspend fun coverage(target: WorktreeMergeProof = proof, head: String = source, safe: Boolean = true) =
-            WorktreeStatusReader.mergeCoverage(repository, head, target, safe)
-        val missingTarget = coverage()
-        assertFalse(missingTarget.first)
-        assertTrue(missingTarget.second.contains("Refresh"))
-        git(repository, "update-ref", "refs/remotes/origin/main", source)
-        val replacedTarget = coverage()
-        assertFalse(replacedTarget.first)
-        assertTrue(replacedTarget.second.contains("not retained"))
-        git(repository, "update-ref", "refs/remotes/origin/main", merged)
-        assertTrue(coverage().first)
-        assertFalse(coverage(proof.copy(mergeCommit = "f".repeat(40))).first)
-        assertFalse(coverage(proof.copy(baseRepository = "")).first)
-        assertFalse(coverage(proof.copy(baseBranch = "missing")).first)
-        assertFalse(coverage(proof.copy(mergeCommit = "")).first)
-        assertFalse(coverage(safe = false).first)
+        val target = WorktreeCleanupTarget("origin", remoteUrl, "main", merged)
+        suspend fun classify(head: String = source, proofs: List<WorktreeMergeProof> = listOf(proof), destination: WorktreeCleanupTarget = target) =
+            WorktreeCleanup.classify(repository, head, destination, WorktreeReviewStatus("Open #99", "Newest PR is unrelated.", mergeProofs = proofs))
+        val evidence = classify()
+        assertEquals("MERGED", evidence.kind)
+        assertEquals("MERGED", classify(older).kind)
+        assertFalse(evidence.fingerprint == classify(older).fingerprint)
+        assertEquals("MERGED", classify(proofs = listOf(proof.copy(head = "f".repeat(40)), proof)).kind)
+        assertEquals("BLOCKED", classify(proofs = listOf(proof.copy(baseRepository = "another/repo"))).kind)
+        assertEquals("BLOCKED", classify(proofs = listOf(proof.copy(baseBranch = "release"))).kind)
+        assertEquals("BLOCKED", classify(proofs = listOf(proof.copy(remoteUrl = "https://github.com/another/repo.git"))).kind)
+        assertEquals("BLOCKED", classify(proofs = listOf(proof.copy(mergeCommit = "f".repeat(40)))).kind)
+        assertEquals("BLOCKED", classify(destination = target.copy(head = git(repository, "rev-parse", "main^").trim())).kind)
         commit(repository, "later local commit")
-        val later = git(repository, "rev-parse", "HEAD").trim()
-        assertFalse(coverage(head = later).first)
-        git(repository, "remote", "set-url", "origin", temporary.resolve("different-remote").toString())
-        val changedRemote = coverage()
-        assertFalse(changedRemote.first)
-        assertTrue(changedRemote.second.contains("remote changed"))
+        assertEquals("BLOCKED", classify(git(repository, "rev-parse", "HEAD").trim()).kind)
+        withContext(Dispatchers.IO) { Files.writeString(repository.resolve(".git/shallow"), source + "\n") }
+        try {
+            classify()
+            fail("Shallow history must not prove merge coverage")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message!!.contains("Shallow"))
+        }
+    }
+
+    fun testOlderSquashedSourceFetchesMissingVerifiedPrHeadWithoutChangingBranches() = runBlocking {
+        val repository = initialize()
+        git(repository, "checkout", "-b", "feature")
+        commit(repository, "older local source")
+        val older = git(repository, "rev-parse", "HEAD").trim()
+        val clone = temporary.resolve("old-checkout")
+        git(repository, "clone", "--no-local", repository.toString(), clone.toString())
+        commit(repository, "final PR source")
+        val source = git(repository, "rev-parse", "HEAD").trim()
+        git(repository, "checkout", "main")
+        commit(repository, "squashed result")
+        val merged = git(repository, "rev-parse", "HEAD").trim()
+        val remoteDirectory = withContext(Dispatchers.IO) { Files.createDirectories(temporary.resolve("host/owner")) }
+        val remote = remoteDirectory.resolve("repo.git")
+        git(repository, "clone", "--bare", repository.toString(), remote.toString())
+        git(remote, "update-ref", "-d", "refs/heads/feature")
+        git(remote, "update-ref", "refs/pull/42/head", source)
+        git(clone, "fetch", remote.toString(), "main:refs/remotes/origin/main")
+        val remoteUrl = "https://github.com/owner/repo.git"
+        git(clone, "remote", "set-url", "origin", remoteUrl)
+        val localHost = temporary.resolve("host").toUri().toString().trimEnd('/') + "/"
+        git(clone, "config", "url.$localHost.insteadOf", "https://github.com/")
+        val target = WorktreeCleanupTarget("origin", remoteUrl, "main", merged)
+        val proof = WorktreeMergeProof(source, merged, "owner/repo", "main", "origin", remoteUrl)
+        val review = WorktreeReviewStatus("Merged #42", "Verified same repository.", mergeProof = proof)
+        assertEquals("BLOCKED", WorktreeCleanup.classify(clone, older, target, review).kind)
+        try {
+            git(clone, "cat-file", "-e", "$source^{commit}")
+            fail("Fixture must start without the final PR source object")
+        } catch (_: java.io.IOException) {
+            // The deleted remote source branch was never fetched into the older checkout.
+        }
+        val beforeRefs = git(clone, "for-each-ref", "--format=%(refname) %(objectname)")
+        val fetched = WorktreeCleanup.proofEvidence(project, clone, older, target, review)
+        assertEquals(fetched.details, "MERGED", fetched.kind)
+        assertEquals(source, git(clone, "rev-parse", "FETCH_HEAD^{commit}").trim())
+        assertEquals(older, git(clone, "rev-parse", "HEAD").trim())
+        assertEquals(beforeRefs, git(clone, "for-each-ref", "--format=%(refname) %(objectname)"))
+        val unavailable = WorktreeCleanup.proofEvidence(
+            project, clone, older, target, review.copy(mergeProofs = listOf(proof.copy(head = "f".repeat(40)))),
+        )
+        assertEquals("BLOCKED", unavailable.kind)
+        assertTrue(unavailable.details.contains("Cannot fetch verified PR source"))
+    }
+
+    fun testClosedUnmergedProofIsDistinctAndDoesNotCoverLaterLocalCommits() = runBlocking {
+        val repository = initialize()
+        val base = git(repository, "rev-parse", "HEAD").trim()
+        git(repository, "checkout", "-b", "feature")
+        commit(repository, "older feature")
+        val older = git(repository, "rev-parse", "HEAD").trim()
+        commit(repository, "closed source")
+        val source = git(repository, "rev-parse", "HEAD").trim()
+        val remoteUrl = "https://github.com/owner/repo.git"
+        git(repository, "remote", "add", "origin", remoteUrl)
+        val proof = WorktreeClosedProof(source, "owner/repo", "main", "origin", remoteUrl, 42, "https://github.com/owner/repo/pull/42")
+        val target = WorktreeCleanupTarget("origin", remoteUrl, "main", base)
+        suspend fun classify(head: String = source, candidate: WorktreeClosedProof = proof) = WorktreeCleanup.classify(
+            repository, head, target, WorktreeReviewStatus("Closed #42", "Not merged.", closedProofs = listOf(candidate)),
+        )
+        val closed = classify()
+        assertEquals("CLOSED_UNMERGED", closed.kind)
+        assertTrue(closed.details.contains("closed without merging"))
+        assertEquals("CLOSED_UNMERGED", classify(older).kind)
+        assertEquals("BLOCKED", classify(candidate = proof.copy(baseRepository = "other/repo")).kind)
+        commit(repository, "later local commit")
+        assertEquals("BLOCKED", classify(git(repository, "rev-parse", "HEAD").trim()).kind)
+    }
+
+    fun testGitOnlyCleanupChecksFreshDefaultTargetAndFingerprintWithoutGithub() = runBlocking {
+        val repository = initialize()
+        git(repository, "checkout", "-b", "feature")
+        commit(repository, "feature")
+        val source = git(repository, "rev-parse", "HEAD").trim()
+        git(repository, "checkout", "main")
+        git(repository, "merge", "--ff-only", "feature")
+        val linked = temporary.resolve("linked")
+        git(repository, "worktree", "add", linked.toString(), "feature")
+        val remote = temporary.resolve("remote.git")
+        git(repository, "clone", "--bare", repository.toString(), remote.toString())
+        git(repository, "remote", "add", "origin", remote.toString())
+        git(repository, "update-ref", "refs/remotes/origin/main", source)
+        val entry = GitWorktrees.discover(repository.toString()).single { it.directory == linked.toString() }
+        suspend fun preview(candidate: GitWorktree = entry) = WorktreeCleanup.preview(project, repository.toString(), candidate)
+        val first = preview()
+        assertEquals(first.details, "MERGED", first.kind)
+        assertTrue(first.fingerprint.isNotBlank())
+        commit(repository, "target advances")
+        val advanced = git(repository, "rev-parse", "HEAD").trim()
+        git(remote, "fetch", repository.toString(), "main:main")
+        assertEquals("BLOCKED", preview().kind)
+        git(repository, "update-ref", "refs/remotes/origin/main", advanced)
+        val refreshed = preview()
+        assertEquals("MERGED", refreshed.kind)
+        assertFalse(first.fingerprint == refreshed.fingerprint)
+        git(remote, "symbolic-ref", "HEAD", "refs/heads/feature")
+        assertEquals("BLOCKED", preview().kind)
+        git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        assertEquals("BLOCKED", preview(entry.copy(head = "f".repeat(40))).kind)
+        assertEquals("BLOCKED", preview(entry.copy(locked = "Keep")).kind)
+        assertEquals("BLOCKED", preview(entry.copy(main = true)).kind)
+        git(linked, "checkout", "--detach")
+        val detached = GitWorktrees.discover(repository.toString()).single { it.directory == linked.toString() }
+        assertTrue(detached.detached)
+        assertEquals("MERGED", preview(detached).kind)
+        commit(linked, "unmerged detached commit")
+        val laterDetached = GitWorktrees.discover(repository.toString()).single { it.directory == linked.toString() }
+        assertEquals("BLOCKED", preview(laterDetached).kind)
+    }
+
+    fun testDefaultTargetAdvertisementRequiresSymbolicHeadAndExactCommitIdentity() {
+        val head = "a".repeat(40)
+        assertEquals("main", WorktreeCleanup.advertisedTarget("origin", "remote", "ref: refs/heads/main\tHEAD\n$head\tHEAD\n").branch)
+        for (advertisement in listOf("$head\tHEAD", "ref: refs/heads/main\tHEAD", "ref: refs/heads/main\tHEAD\ninvalid\tHEAD")) {
+            try {
+                WorktreeCleanup.advertisedTarget("origin", "remote", advertisement)
+                fail("Unknown remote default target must be blocked")
+            } catch (_: java.io.IOException) {
+                // Expected: neither cached remote HEAD nor a missing object proves a live default target.
+            }
+        }
     }
 
     fun testDirtyParserDoesNotMistakeRenameSourceOrNewlinePathsForFiles() {

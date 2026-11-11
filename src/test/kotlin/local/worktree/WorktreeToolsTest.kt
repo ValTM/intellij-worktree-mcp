@@ -29,6 +29,62 @@ class WorktreeToolsTest : HeavyPlatformTestCase() {
     override fun runInDispatchThread(): Boolean = false
     override fun isCreateDirectoryBasedProject(): Boolean = true
 
+    fun testRemovalApprovalBindsOptionsAndDirtyContents() = runBlocking {
+        val temporary = Files.createTempDirectory("worktree-tools-removal-").toRealPath()
+        try {
+            val repository = Files.createDirectory(temporary.resolve("repository"))
+            val linked = temporary.resolve("linked")
+            GitWorktrees.git(repository, "init", "-b", "main")
+            GitWorktrees.git(repository, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                "commit", "--allow-empty", "-m", "initial")
+            GitWorktrees.git(repository, "worktree", "add", "-b", "feature", linked.toString())
+            val file = linked.resolve("local.txt")
+            Files.writeString(file, "first content")
+            val tools = WorktreeTools()
+            val directories = listOf(linked.toString())
+            fun result(json: String) = JsonParser.parseString(json).asJsonObject.getAsJsonArray("results").single().asJsonObject
+            val safe = result(tools.worktree_remove_preview(repository.toString(), directories))
+            assertEquals("blocked", safe["status"].asString)
+            assertTrue(safe["selectable"].asBoolean)
+            assertFalse(safe["safe"].asBoolean)
+            val destructive = result(tools.worktree_remove_preview(repository.toString(), directories,
+                deleteLocalChanges = directories))
+            assertEquals("preview", destructive["status"].asString)
+            val token = listOf(destructive["confirmation"].asString)
+            val changedOptions = result(tools.worktree_remove(repository.toString(), directories, token))
+            assertEquals("blocked", changedOptions["status"].asString)
+            assertEquals("first content", Files.readString(file))
+            Files.writeString(file, "second content")
+            val stale = result(tools.worktree_remove(repository.toString(), directories, token,
+                deleteLocalChanges = directories))
+            assertEquals("blocked", stale["status"].asString)
+            assertEquals("second content", Files.readString(file))
+            val current = result(tools.worktree_remove_preview(repository.toString(), directories,
+                deleteLocalChanges = directories))
+            val removed = result(tools.worktree_remove(repository.toString(), directories,
+                listOf(current["confirmation"].asString), deleteLocalChanges = directories))
+            assertEquals("removed", removed["status"].asString)
+            assertFalse(Files.exists(linked))
+            assertEquals(GitWorktrees.git(repository, "rev-parse", "main").trim(),
+                GitWorktrees.git(repository, "rev-parse", "feature").trim())
+        } finally {
+            com.intellij.openapi.util.io.FileUtil.delete(temporary.toFile())
+        }
+    }
+
+    fun testRemovalCannotTargetAnOpenProjectWithDestructiveOptions() = runBlocking {
+        val repository = Files.createDirectories(Path.of(project.basePath!!)).toRealPath()
+        GitWorktrees.git(repository, "init", "-b", "main")
+        GitWorktrees.git(repository, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "commit", "--allow-empty", "-m", "initial")
+        val response = JsonParser.parseString(WorktreeTools().worktree_remove_preview(
+            repository.toString(), listOf(repository.toString()), deleteLocalChanges = listOf(repository.toString()),
+        )).asJsonObject.getAsJsonArray("results").single().asJsonObject
+        assertEquals("blocked", response["status"].asString)
+        assertFalse(response["selectable"].asBoolean)
+        assertTrue(response.getAsJsonArray("blockedCodes").any { it.asString == "OPEN_PROJECT" })
+        assertTrue(Files.isDirectory(repository))
+    }
 
     fun testOpenAndMergeRequiresOneUsableWorktree() {
         val action = OpenAndMergeWorktreeAction()
