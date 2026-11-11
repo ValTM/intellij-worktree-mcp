@@ -44,7 +44,6 @@ class OpenAndMergeWorktreeAction : DumbAwareAction() {
         event.getData(selectedWorktrees)?.singleOrNull()?.takeUnless { it.isPrunable }
 
     companion object {
-        // The internal key's package moved in 263; its data ID and model are shared by 262–263.
         private val selectedWorktrees = DataKey.create<List<GitWorkingTree>>("SELECTED_GIT_WORKING_TREE_IN_WORKING_TREE_TAB")
     }
 }
@@ -52,19 +51,32 @@ class OpenAndMergeWorktreeAction : DumbAwareAction() {
 @Service(Service.Level.PROJECT)
 class WorktreeOpener(private val project: Project, private val scope: CoroutineScope) {
     fun openAndMerge(directory: String, target: String) {
+        open(directory, target, merge = true) { _, tools -> showWorktrees(tools, directory) }
+    }
+
+    fun openReview(directory: String, target: String, branch: String, merge: Boolean) {
+        open(directory, target, merge) { opened, _ -> openWorktreeReview(opened, directory, branch) }
+    }
+
+    private fun open(
+        directory: String,
+        target: String,
+        merge: Boolean,
+        onOpened: suspend (Project, WorktreeTools) -> Unit,
+    ) {
         scope.launch(Dispatchers.Default) {
             val failure = try {
                 val tools = WorktreeTools()
                 val existing = ProjectUtil.findProject(Path.of(directory))
-                if (existing != null && tools.shareWindowGroup(project, existing)) {
+                if (existing != null && (!merge || tools.shareWindowGroup(project, existing))) {
                     withContext(Dispatchers.EDT) {
                         if (!existing.isDisposed) ProjectUtil.focusProjectWindow(existing, true)
                     }
-                    showWorktrees(tools, directory)
+                    onOpened(existing, tools)
                     return@launch
                 }
                 val verb = if (existing == null) "Open and Merge All" else "Merge All"
-                val confirmed = withContext(Dispatchers.EDT) {
+                val confirmed = !merge || withContext(Dispatchers.EDT) {
                     !project.isDisposed && Messages.showYesNoDialog(
                         project,
                         "Project: $directory\n\nMerge ALL eligible project windows, including unrelated projects.\n" +
@@ -74,30 +86,30 @@ class WorktreeOpener(private val project: Project, private val scope: CoroutineS
                 }
                 if (!confirmed) return@launch
                 val result = JsonParser.parseString(
-                    tools.worktree_open(directory, merge = true, targetDirectory = target),
+                    tools.worktree_open(directory, merge = merge, targetDirectory = target),
                 ).asJsonObject
                 val status = result.get("status").asString
                 val mergeStatus = result.getAsJsonObject("merge")?.get("status")?.asString
                 when {
                     status != "opened" && status != "reused" -> "Project opening did not complete: $status"
-                    mergeStatus != "merged" && mergeStatus != "not_needed" ->
+                    merge && mergeStatus != "merged" && mergeStatus != "not_needed" ->
                         "Project $status, but window merging did not complete: $mergeStatus. The project remains open."
                     else -> {
                         val opened = ProjectUtil.findProject(Path.of(directory))
                         withContext(Dispatchers.EDT) {
                             if (opened != null && !opened.isDisposed) ProjectUtil.focusProjectWindow(opened, true)
                         }
-                        if (opened != null) showWorktrees(tools, directory)
+                        if (opened != null) onOpened(opened, tools)
                         if (opened == null) "Project is no longer open: $directory" else null
                     }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                "Opening or merging failed. Inspect the open projects before retrying."
+                "Opening the worktree or its requested view failed. Inspect the open projects before retrying."
             }
             if (failure != null) withContext(Dispatchers.EDT) {
-                if (!project.isDisposed) Messages.showWarningDialog(project, failure, "Open and Merge Worktree")
+                if (!project.isDisposed) Messages.showWarningDialog(project, failure, "Open Worktree")
             }
         }
     }

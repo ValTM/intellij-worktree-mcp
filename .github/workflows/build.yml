@@ -69,11 +69,11 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
-          curl --fail --location --retry 3 -O https://download.jetbrains.com/webstorm/WebStorm-2026.2.3.tar.gz
-          curl --fail --location --retry 3 -O https://download.jetbrains.com/webstorm/WebStorm-2026.2.3.tar.gz.sha256
-          sha256sum --check WebStorm-2026.2.3.tar.gz.sha256
+          curl --fail --location --retry 3 -O https://download.jetbrains.com/webstorm/WebStorm-2026.3.tar.gz
+          curl --fail --location --retry 3 -O https://download.jetbrains.com/webstorm/WebStorm-2026.3.tar.gz.sha256
+          sha256sum --check WebStorm-2026.3.tar.gz.sha256
           mkdir webstorm-sdk
-          tar -xzf WebStorm-2026.2.3.tar.gz -C webstorm-sdk --strip-components=1
+          tar -xzf WebStorm-2026.3.tar.gz -C webstorm-sdk --strip-components=1
       - name: Build, platform tests and compatibility
         if: steps.changes.outputs.full != 'false'
         shell: bash
