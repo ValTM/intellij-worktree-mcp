@@ -58,7 +58,7 @@ internal class GithubWorktreeStatusProvider(private val project: Project) : Work
                 ?: matching.singleOrNull()
                 ?: throw IOException(if (matching.isEmpty()) "Log in to ${coordinates.serverPath.host} in Settings > Version Control > GitHub, then Refresh"
                     else "Select the project default GitHub account in Settings > Version Control > GitHub, then Refresh; multiple accounts match ${coordinates.serverPath.host}")
-            val key = "${account.id}\u0000$coordinates\u0000$branch"
+            val key = "${account.id}\u0000$coordinates\u0000${remote.name}\u0000${remote.urls}\u0000$branch"
             cache[key]?.let { return it }
             val loadedGeneration = generation.get()
             val result = withTimeout(30_000) {
@@ -76,36 +76,47 @@ internal class GithubWorktreeStatusProvider(private val project: Project) : Work
                     } while (response.hasNext)
                     return numbers
                 }
-                val number = numbers(GithubIssueState.open).maxOrNull() ?: numbers(GithubIssueState.closed).maxOrNull()
-                if (number == null) WorktreeReviewStatus("No PR", "No pull request for $headFilter in $coordinates. Click Refresh to query GitHub again.")
+                val open = numbers(GithubIssueState.open)
+                val closed = numbers(GithubIssueState.closed)
+                val candidates = (open + closed).distinct().sortedDescending()
+                if (candidates.isEmpty()) WorktreeReviewStatus("No PR", "No pull request for $headFilter in $coordinates. Click Refresh to query GitHub again.")
                 else {
                     val path = coordinates.repositoryPath
-                    val url = "${coordinates.serverPath.toApiUrl().trimEnd('/')}/repos/${path.owner}/${path.repository}/pulls/$number"
-                    val data = executor.execute(GithubApiRequest.Get.JsonMap<String, Any?>(url))
-                    val head = data["head"] as? Map<*, *> ?: throw IOException("GitHub response has no PR head")
-                    val headRepository = head["repo"] as? Map<*, *>
-                    if (head["ref"] != branch || (headRepository != null &&
-                        (headRepository["full_name"] as? String)?.equals("${path.owner}/${path.repository}", true) != true)) {
-                        throw IOException("GitHub returned a review for a different source branch or repository")
+                    val reviews = candidates.map { number ->
+                        val url = "${coordinates.serverPath.toApiUrl().trimEnd('/')}/repos/${path.owner}/${path.repository}/pulls/$number"
+                        val data = executor.execute(GithubApiRequest.Get.JsonMap<String, Any?>(url))
+                        val head = data["head"] as? Map<*, *> ?: throw IOException("GitHub response has no PR head")
+                        val headRepository = head["repo"] as? Map<*, *>
+                        if (head["ref"] != branch || (headRepository != null &&
+                            (headRepository["full_name"] as? String)?.equals("${path.owner}/${path.repository}", true) != true)) {
+                            throw IOException("GitHub returned a review for a different source branch or repository")
+                        }
+                        val state = data["state"] as? String ?: throw IOException("GitHub response has no PR state")
+                        val merged = data["merged"] as? Boolean ?: throw IOException("GitHub response has no merge state")
+                        val draft = data["draft"] as? Boolean ?: throw IOException("GitHub response has no draft state")
+                        val base = data["base"] as? Map<*, *>
+                        val baseRepository = (base?.get("repo") as? Map<*, *>)?.get("full_name") as? String
+                        val baseBranch = (base?.get("ref") as? String)?.takeIf { it.isNotBlank() }
+                        val sourceHead = (head["sha"] as? String)?.takeIf { headRepository != null }
+                        val mergeCommit = (data["merge_commit_sha"] as? String)?.takeIf { data["merged_at"] is String }
+                        val remoteUrl = remote.urls.singleOrNull()
+                        val sameRepository = baseRepository != null && baseRepository.equals("${path.owner}/${path.repository}", true) &&
+                            baseBranch != null && sourceHead != null && remoteUrl != null
+                        val proof = if (sameRepository && merged && mergeCommit != null) {
+                            WorktreeMergeProof(sourceHead!!, mergeCommit, baseRepository!!, baseBranch!!, remote.name, remoteUrl!!)
+                        } else null
+                        val reviewUrl = data["html_url"] as? String ?: throw IOException("GitHub response has no PR URL")
+                        reviewSummary(
+                            number, state, draft, merged,
+                            data["title"] as? String ?: throw IOException("GitHub response has no PR title"), reviewUrl, proof,
+                        ).copy(closedProofs = if (sameRepository && state == "closed" && !merged && data["closed_at"] is String) {
+                            listOf(WorktreeClosedProof(sourceHead!!, baseRepository!!, baseBranch!!, remote.name, remoteUrl!!, number, reviewUrl))
+                        } else emptyList())
                     }
-                    val state = data["state"] as? String ?: throw IOException("GitHub response has no PR state")
-                    val merged = data["merged"] as? Boolean ?: throw IOException("GitHub response has no merge state")
-                    val draft = data["draft"] as? Boolean ?: throw IOException("GitHub response has no draft state")
-                    val base = data["base"] as? Map<*, *>
-                    val baseRepository = (base?.get("repo") as? Map<*, *>)?.get("full_name") as? String
-                    val baseBranch = (base?.get("ref") as? String)?.takeIf { it.isNotBlank() }
-                    val sourceHead = (head["sha"] as? String)?.takeIf { headRepository != null }
-                    val mergeCommit = (data["merge_commit_sha"] as? String)?.takeIf { data["merged_at"] is String }
-                    val remoteUrl = remote.urls.singleOrNull()
-                    val proof = if (baseRepository != null && baseRepository.equals("${path.owner}/${path.repository}", true) &&
-                        baseBranch != null && sourceHead != null && mergeCommit != null && remoteUrl != null) {
-                        WorktreeMergeProof(sourceHead, mergeCommit, baseRepository, baseBranch, remote.name, remoteUrl)
-                    } else null
-                    reviewSummary(
-                        number, state, draft, merged,
-                        data["title"] as? String ?: throw IOException("GitHub response has no PR title"),
-                        data["html_url"] as? String ?: throw IOException("GitHub response has no PR URL"),
-                        proof,
+                    val selected = (open.maxOrNull() ?: closed.maxOrNull())!!
+                    reviews[candidates.indexOf(selected)].copy(
+                        mergeProofs = reviews.flatMap { it.mergeProofs },
+                        closedProofs = reviews.flatMap { it.closedProofs },
                     )
                 }
             }

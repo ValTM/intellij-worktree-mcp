@@ -2,7 +2,7 @@
 
 [![Build and release](https://github.com/ValTM/intellij-worktree-mcp/actions/workflows/build.yml/badge.svg)](https://github.com/ValTM/intellij-worktree-mcp/actions/workflows/build.yml)
 
-Manage independent IntelliJ Platform projects through the IDE's bundled MCP server: discover and switch Git worktrees, preview and create a worktree, open or reuse a directory, close an exact project, merge macOS windows, and discover or run IDE actions. For manual work, use **Git → Worktree Lifecycle**, a permanent tab with repository selection, inline sync/review/state details, Refresh, creation and removal previews, and selectable merged-worktree cleanup. Refresh fetches remotes; GitHub review status uses the IDE's signed-in accounts. Missing or uncertain merge proof blocks cleanup, and branches are never deleted.
+Manage independent IntelliJ Platform projects through the IDE's bundled MCP server: discover and switch Git worktrees, preview and create a worktree, open or reuse a directory, close an exact project, merge macOS windows, and discover or run IDE actions. For manual work, use **Git → Worktree Lifecycle**, a permanent tab with repository selection, inline sync/review/state details, Refresh, creation and removal previews, and selectable worktree cleanup. Refresh fetches remotes; GitHub review status uses the IDE's signed-in accounts. Cleanup uses verified ancestry or merged-PR evidence, with separate opt-in for closed-unmerged PRs. Local branches and changes are preserved unless explicitly approved for deletion; remote branches are never deleted.
 
 ## Compatibility
 
@@ -32,15 +32,19 @@ The optional [agent skill](skills/intellij-worktree/SKILL.md) describes lifecycl
 | `worktree_switch(repositoryDirectory, directory)` | Open or select a worktree belonging to that repository, without merging windows. |
 | `worktree_create_preview(repositoryDirectory, directory, branch, startRef, newBranch=false)` | Preview the exact creation plan and obtain its confirmation token without changing disk or Git. |
 | `worktree_create(repositoryDirectory, directory, branch, startRef, confirmation, newBranch=false, open=false, merge=false, targetDirectory?)` | Revalidate and apply an approved creation plan; optionally open and explicitly merge windows. |
-| `worktree_remove_preview(repositoryDirectory, directories)` | Preview selected linked worktrees, reporting changes, retained history, upstream uncertainty and blocked targets. |
-| `worktree_remove(repositoryDirectory, directories, confirmations)` | Revalidate and remove approved linked worktrees independently, without force or branch deletion. |
+| `worktree_remove_preview(repositoryDirectory, directories, cleanup=false, deleteLocalBranches=[], deleteLocalChanges=[], includeClosedUnmerged=[])` | Preview selected linked worktrees and per-directory options, including exact local changes, unretained commits, remote branch absence and cleanup evidence. |
+| `worktree_remove(repositoryDirectory, directories, confirmations, cleanup=false, deleteLocalBranches=[], deleteLocalChanges=[], includeClosedUnmerged=[])` | Revalidate and apply the exact approved previews and options, reporting each target independently. |
 | `worktree_open(directory, merge=false, targetDirectory?)` | Open or reuse a canonical directory without duplicate projects; optionally merge in the same call. |
 | `worktree_close(directory)` | Close exactly that project, retaining normal save/process/veto safeguards. |
 | `worktree_merge(targetDirectory?)` | Merge **all eligible windows**, not just a selected pair. Defaults to the captured last-active project. |
 | `worktree_search_actions(query, directory, limit=50, filePath?)` | Find action IDs by case-insensitive name/ID substring; return names and availability. Limit: 1–100; groups excluded. |
 | `worktree_action(actionId, directory, filePath?)` | Dispatch an exact registered action in that project's window or explicitly requested editor context. |
 
-Show creation and removal previews to the user before applying their exact confirmation tokens. Creation rejects existing destinations and changed plans; a created worktree remains if optional opening fails. Removal blocks main, locked, unsafe and open-project targets, retains branches, and never closes projects implicitly. Close an authorized project separately through normal IDE safeguards before obtaining a fresh removal preview.
+Show creation and removal previews to the user before applying their exact confirmation tokens. Creation rejects existing destinations and changed plans; a created worktree remains if optional opening fails. Removal always blocks main, locked and open-project targets and never closes projects implicitly. Close an authorized project separately through normal IDE safeguards before obtaining a fresh removal preview.
+
+Removal option lists contain selected **worktree directories**, not branch names. `deleteLocalBranches` requires freshly verified remote absence and explicit approval of any commits losing their last persistent ref. `deleteLocalChanges` irreversibly deletes the disclosed tracked changes, untracked files and ignored files. Both default to empty. Changed files, options or cleanup evidence require a new preview and approval.
+
+In the cleanup dialog, **Select safe worktrees** selects safe merged candidates; **Select all worktrees** selects all nonblocked candidates without enabling either destructive checkbox. Closed-unmerged candidates are never preselected. **Clear selection** clears the selection. **Delete selected worktrees (N)…** opens a fresh final preview; blocked selections cannot be applied. Cleanup fetches remote history and requires the repository to be an open IDE Git root. Shallow or unavailable history does not establish merge safety.
 
 The host's `projectPath` argument routes a call through an **already-open** project. It is distinct from the `directory` being opened and from `targetDirectory`. Use canonical absolute paths and the schemas exposed by your client.
 

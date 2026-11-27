@@ -35,6 +35,8 @@ internal data class WorktreeReviewStatus(
     val url: String? = null,
     val mergeProof: WorktreeMergeProof? = null,
     val error: String? = null,
+    val mergeProofs: List<WorktreeMergeProof> = listOfNotNull(mergeProof),
+    val closedProofs: List<WorktreeClosedProof> = emptyList(),
 )
 
 internal data class WorktreeMergeProof(
@@ -44,6 +46,16 @@ internal data class WorktreeMergeProof(
     val baseBranch: String,
     val remoteName: String,
     val remoteUrl: String,
+)
+
+internal data class WorktreeClosedProof(
+    val head: String,
+    val baseRepository: String,
+    val baseBranch: String,
+    val remoteName: String,
+    val remoteUrl: String,
+    val number: Long,
+    val url: String,
 )
 
 internal fun reviewSummary(
@@ -105,9 +117,10 @@ internal object WorktreeStatusReader {
                     else -> project.getService(WorktreeReviewStatusProvider::class.java)?.read(repository, remoteName, entry.branch)
                         ?: WorktreeReviewStatus("Unavailable", "Enable the GitHub plugin for pull request status. Git operations remain available.")
                 }
-                val coverage = review.mergeProof?.let {
-                    mergeCoverage(directory, head, it, dirty == "Clean" && entry.locked == null && entry.prunable == null)
-                } ?: (false to "")
+                // Read status is advisory and uses local refs; destructive cleanup rechecks the live default target.
+                val coverage = if (entry.locked == null && entry.prunable == null && dirty == "Clean") {
+                    WorktreeCleanup.localEvidence(directory, head, entry.branch, review)
+                } else CleanupEvidence("BLOCKED", "", "")
                 // A second snapshot prevents a slow provider request from blessing a newer local HEAD.
                 val unchanged = GitWorktrees.git(directory, "rev-parse", "--verify", "HEAD^{commit}").trim() == head &&
                     GitWorktrees.git(directory, "rev-parse", "--symbolic-full-name", "HEAD").trim() == branch
@@ -115,8 +128,8 @@ internal object WorktreeStatusReader {
                 val label = listOfNotNull(if (entry.locked != null) "Locked" else null, sync.first, dirty.takeIf { it != "Clean" }).joinToString(" · ")
                 WorktreeDisplayStatus(
                     label, locked + sync.second + " Working tree: $dirty. Remote counts use local refs; click Refresh to fetch.",
-                    review.label, listOf(review.details, coverage.second).filter { it.isNotEmpty() }.joinToString(" "), review.url,
-                    coverage.first && unchanged,
+                    review.label, listOf(review.details, coverage.details).filter { it.isNotEmpty() }.joinToString(" "), review.url,
+                    coverage.kind == "MERGED" && unchanged,
                     if (!unchanged) "Worktree HEAD changed during inspection; click Refresh." else review.error,
                 )
             } catch (cancelled: CancellationException) {
@@ -140,39 +153,13 @@ internal object WorktreeStatusReader {
         repository.update()
     }
 
-    private fun repository(project: Project, directory: String): GitRepository? {
+    internal fun repository(project: Project, directory: String): GitRepository? {
         val canonical = Path.of(directory).toRealPath()
         return GitRepositoryManager.getInstance(project).repositories.singleOrNull {
             Path.of(it.root.path).toRealPath() == canonical
         }
     }
 
-    internal suspend fun mergeCoverage(
-        directory: Path, head: String, proof: WorktreeMergeProof, safeSnapshot: Boolean,
-    ): Pair<Boolean, String> {
-        if (!safeSnapshot) return false to "Cleanup is unavailable for a dirty, locked, or prunable worktree."
-        if (head != proof.head) return false to "Current HEAD is not the merged PR source HEAD; later or different local commits are not covered."
-        val target = "refs/remotes/${proof.remoteName}/${proof.baseBranch}"
-        try {
-            require(proof.baseRepository.isNotBlank() && proof.remoteUrl.isNotBlank()) { "Missing merge target repository identity" }
-            require(proof.head.matches(Regex("[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")) &&
-                proof.mergeCommit.matches(Regex("[0-9a-fA-F]{40}|[0-9a-fA-F]{64}"))) { "Invalid merge proof commit ID" }
-            GitWorktrees.git(directory, "check-ref-format", target)
-            val urls = GitWorktrees.git(directory, "config", "--null", "--get-all", "remote.${proof.remoteName}.url")
-                .split('\u0000').filter { it.isNotEmpty() }
-            if (urls != listOf(proof.remoteUrl)) return false to "Merge target remote changed; check the GitHub remote and Refresh."
-            val targetHead = GitWorktrees.git(directory, "rev-parse", "--verify", "--end-of-options", "$target^{commit}").trim()
-            val ancestor = GitWorktrees.git(directory, "merge-base", proof.mergeCommit, targetHead).trim()
-            if (ancestor != proof.mergeCommit) return false to "Merged commit is not retained in $target; Refresh and inspect the target branch before cleanup."
-            return true to "Exact source HEAD is merged, and merge commit ${proof.mergeCommit} is retained in $target."
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (cancelled: ProcessCanceledException) {
-            throw cancelled
-        } catch (error: Exception) {
-            return false to "Merge target history is unavailable: ${error.message}. Refresh to fetch $target; cleanup remains unavailable."
-        }
-    }
 
     internal fun syncSummary(
         detached: Boolean, upstream: String?, upstreamExists: Boolean, published: Boolean, ahead: Int?, behind: Int?,

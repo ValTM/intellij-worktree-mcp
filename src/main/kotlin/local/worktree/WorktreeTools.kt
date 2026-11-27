@@ -225,60 +225,115 @@ class WorktreeTools : McpToolset {
     }
 
     @McpTool
-    @McpDescription("Preview removal of selected linked worktrees. Reports changes, retained-history checks and unknown upstream state. Main, locked, unsafe and open IDE projects are blocked. No files, projects or branches are changed.")
+    @McpDescription("Preview selected worktree removals. Cleanup refreshes remote history and classifies merged or closed-unmerged reviews. Branches and local changes are preserved by default. Destructive option lists name individual directories; disclose all files and unretained commits and obtain explicit approval before applying. Never deletes remote branches or closes projects.")
     suspend fun worktree_remove_preview(
         @McpDescription("Explicit absolute repository directory.") repositoryDirectory: String,
         @McpDescription("Absolute worktree directories selected for removal.") directories: List<String>,
-    ): String {
+        @McpDescription("Require refreshed merge or explicitly opted-in closed-unmerged evidence.") cleanup: Boolean = false,
+        @McpDescription("Directories whose local branches may be deleted, only with verified remote absence.") deleteLocalBranches: List<String> = emptyList(),
+        @McpDescription("Directories whose disclosed tracked, untracked and ignored local changes may be irreversibly deleted.") deleteLocalChanges: List<String> = emptyList(),
+        @McpDescription("Directories explicitly opted into closed-unmerged cleanup; never implicitly selected.") includeClosedUnmerged: List<String> = emptyList(),
+    ): String = inventoryResult {
+        validateRemovalOptions(directories, deleteLocalBranches, deleteLocalChanges, includeClosedUnmerged)
+        val project = if (cleanup) cleanupProject(repositoryDirectory).also { WorktreeStatusReader.refresh(it, repositoryDirectory) } else null
         val results = directories.map { directory ->
             removalResult(directory) {
-                val plan = GitWorktrees.previewRemove(repositoryDirectory, directory)
-                val path = canonical(plan.directory)
-                val open = path != null && onEdt { overlapsOpenProject(path) }
-                gson.toJsonTree(plan).asJsonObject.apply {
-                    addProperty("open", open)
-                    if (open) {
-                        getAsJsonArray("blockedReasons").add("Project is open; close it separately using normal IDE safeguards")
-                        getAsJsonArray("blockedCodes").add(GitWorktrees.RemovalBlockReason.OPEN_PROJECT.name)
-                    }
-                    addProperty("status", if (open || plan.blockedReasons.isNotEmpty()) "blocked" else "preview")
-                }
+                removalPreview(repositoryDirectory, directory, project,
+                    GitWorktrees.RemovalOptions(directory in deleteLocalBranches, directory in deleteLocalChanges),
+                    directory in includeClosedUnmerged).second
             }
         }
-        return gson.toJson(mapOf("status" to "preview", "results" to results))
+        gson.toJson(mapOf("status" to "preview", "results" to results))
     }
 
     @McpTool
-    @McpDescription("Remove only explicitly approved linked worktrees, with one preview confirmation per directory. Revalidates each target immediately before removal. Open projects are skipped: close them separately through normal IDE save/process/veto safeguards. Never uses force or deletes branches. Returns an independent outcome for each target.")
+    @McpDescription("Apply explicitly approved per-worktree previews with exactly the same options and confirmation tokens. Revalidates remote proof, files, refs and open projects. Destructive flags require explicit approval of the disclosed loss. Never deletes remote branches or closes IDE projects. Reports each target independently.")
     suspend fun worktree_remove(
         @McpDescription("Explicit repository directory used for the preview.") repositoryDirectory: String,
         @McpDescription("Approved absolute worktree directories.") directories: List<String>,
         @McpDescription("Preview confirmation tokens, in the same order as directories.") confirmations: List<String>,
-    ): String {
-        if (directories.size != confirmations.size) {
-            return encode(Outcome("invalid_request", reason = "Each directory requires its own preview confirmation"))
-        }
+        @McpDescription("Same cleanup mode as the approved preview.") cleanup: Boolean = false,
+        @McpDescription("Same explicitly approved local branch deletion directories.") deleteLocalBranches: List<String> = emptyList(),
+        @McpDescription("Same explicitly approved irreversible local-change deletion directories.") deleteLocalChanges: List<String> = emptyList(),
+        @McpDescription("Same explicitly approved closed-unmerged directories.") includeClosedUnmerged: List<String> = emptyList(),
+    ): String = inventoryResult {
+        require(directories.size == confirmations.size) { "Each directory requires its own preview confirmation" }
+        validateRemovalOptions(directories, deleteLocalBranches, deleteLocalChanges, includeClosedUnmerged)
+        val project = if (cleanup) cleanupProject(repositoryDirectory).also { WorktreeStatusReader.refresh(it, repositoryDirectory) } else null
         val results = directories.mapIndexed { index, directory ->
             removalResult(directory) {
                 opening.withLock {
-                    val plan = GitWorktrees.previewRemove(repositoryDirectory, directory)
-                    val path = canonical(plan.directory)
-                    val open = path != null && onEdt { overlapsOpenProject(path) }
-                    if (open || plan.blockedReasons.isNotEmpty()) {
-                        gson.toJsonTree(mapOf(
-                            "directory" to plan.directory, "status" to "blocked",
-                            "blockedCodes" to if (open) plan.blockedCodes + GitWorktrees.RemovalBlockReason.OPEN_PROJECT else plan.blockedCodes,
-                            "reason" to if (open) "Project is open; close it separately using normal IDE safeguards"
-                                else plan.blockedReasons.joinToString("; "),
-                        )).asJsonObject
-                    } else {
-                        val removed = GitWorktrees.remove(plan, confirmations[index])
-                        gson.toJsonTree(mapOf("directory" to removed, "status" to "removed")).asJsonObject
+                    val (plan, preview) = removalPreview(repositoryDirectory, directory, project,
+                        GitWorktrees.RemovalOptions(directory in deleteLocalBranches, directory in deleteLocalChanges),
+                        directory in includeClosedUnmerged)
+                    require(preview["status"].asString == "preview") {
+                        "Removal is blocked: ${preview["blockedReasons"]}"
                     }
+                    require(confirmations[index].isNotEmpty() && confirmations[index] == preview["confirmation"].asString) {
+                        "Removal state or options changed; obtain and approve a new preview"
+                    }
+                    val path = canonical(plan.directory)
+                    require(path != null && !onEdt { overlapsOpenProject(path) }) {
+                        "Project opened during preview; close it separately and obtain a new preview"
+                    }
+                    val removed = GitWorktrees.remove(plan, plan.confirmation)
+                    gson.toJsonTree(mapOf("directory" to removed, "status" to "removed",
+                        "localBranchDeleted" to plan.options.deleteLocalBranch)).asJsonObject
                 }
             }
         }
-        return gson.toJson(mapOf("status" to "completed", "results" to results))
+        gson.toJson(mapOf("status" to "completed", "results" to results))
+    }
+
+    private fun validateRemovalOptions(directories: List<String>, vararg options: List<String>) {
+        require(directories.distinct().size == directories.size) { "Worktree directories must be unique" }
+        require(options.all { directories.containsAll(it) }) { "Removal options must refer only to selected directories" }
+    }
+
+    private suspend fun cleanupProject(repositoryDirectory: String): Project {
+        val path = canonical(repositoryDirectory) ?: throw IOException("Repository directory is unavailable")
+        return onEdt {
+            ProjectManager.getInstance().openProjects.firstOrNull { project ->
+                git4idea.repo.GitRepositoryManager.getInstance(project).repositories.any {
+                    canonical(it.root.path) == path
+                }
+            }
+        } ?: throw IOException("Open the repository as an IDE Git root before cleanup")
+    }
+
+    private suspend fun removalPreview(
+        repositoryDirectory: String, directory: String, project: Project?,
+        options: GitWorktrees.RemovalOptions, includeClosedUnmerged: Boolean,
+    ): Pair<GitWorktrees.RemovalPlan, com.google.gson.JsonObject> {
+        val plan = GitWorktrees.previewRemove(repositoryDirectory, directory, options)
+        val path = canonical(plan.directory)
+        val open = path != null && onEdt { overlapsOpenProject(path) }
+        val entry = if (project != null) GitWorktrees.discover(repositoryDirectory).singleOrNull { it.directory == plan.directory } else null
+        val evidence = if (project != null && entry != null) WorktreeCleanup.preview(project, repositoryDirectory, entry) else null
+        val kind = evidence?.kind ?: if (project == null) "NONE" else "BLOCKED"
+        val result = gson.toJsonTree(plan).asJsonObject
+        fun block(code: String, reason: String) {
+            result.getAsJsonArray("blockedCodes").add(code)
+            result.getAsJsonArray("blockedReasons").add(reason)
+        }
+        if (open) block("OPEN_PROJECT", "Project is open; close it separately using normal IDE safeguards")
+        if (kind == "BLOCKED") block("CLEANUP_UNPROVEN", evidence?.details ?: "Cleanup evidence is unavailable")
+        if (kind == "CLOSED_UNMERGED" && !includeClosedUnmerged) {
+            block("CLOSED_UNMERGED_OPT_IN", "Closed without merging; explicitly select this worktree to opt in")
+        }
+        val optionalBlocks = setOf("TRACKED_CHANGES", "UNTRACKED_FILES", "IGNORED_FILES", "CLOSED_UNMERGED_OPT_IN")
+        result.addProperty("open", open)
+        result.addProperty("cleanupKind", kind)
+        result.addProperty("cleanupDetails", evidence?.details ?: "Individually approved removal; no merge classification required")
+        result.addProperty("selectable", result.getAsJsonArray("blockedCodes").all { it.asString in optionalBlocks })
+        val allowed = result.getAsJsonArray("blockedCodes").isEmpty
+        result.addProperty("safe", allowed && !options.deleteLocalBranch && !options.deleteLocalChanges &&
+            (kind == "MERGED" || kind == "NONE"))
+        result.addProperty("status", if (allowed) "preview" else "blocked")
+        val state = listOf(plan.confirmation, evidence?.fingerprint.orEmpty(), kind, includeClosedUnmerged.toString(), open.toString())
+        result.addProperty("confirmation", java.security.MessageDigest.getInstance("SHA-256")
+            .digest(gson.toJson(state).toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) })
+        return plan to result
     }
 
     private suspend fun removalResult(directory: String, block: suspend () -> com.google.gson.JsonObject): com.google.gson.JsonObject = try {

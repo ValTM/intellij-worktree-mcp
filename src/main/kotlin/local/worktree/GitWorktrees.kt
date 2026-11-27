@@ -47,23 +47,44 @@ internal object GitWorktrees {
         HISTORY_UNKNOWN,
         TRACKED_CHANGES,
         UNTRACKED_FILES,
+        IGNORED_FILES,
+        REMOTE_BRANCH_UNKNOWN,
+        REMOTE_BRANCH_PRESENT,
+        BRANCH_REQUIRED,
+        BRANCH_CHECKED_OUT,
         UNRETAINED_COMMITS,
         OPEN_PROJECT,
     }
+
+    internal data class RemovalOptions(
+        val deleteLocalBranch: Boolean = false,
+        val deleteLocalChanges: Boolean = false,
+    )
 
     internal data class RemovalPlan(
         val repositoryDirectory: String,
         val directory: String,
         val head: String?,
         val branch: String?,
+        val options: RemovalOptions,
         val trackedChanges: List<String>,
         val untrackedFiles: List<String>,
+        val ignoredFiles: List<String>,
+        val remoteBranchAbsent: Boolean,
+        val remoteBranchDetails: String,
+        val unretainedCommitIds: List<String>,
         val unpushedCommits: Int?,
         val historyKnown: Boolean,
         val unsafeCommits: Int?,
         val blockedReasons: List<String>,
         val blockedCodes: List<RemovalBlockReason>,
         val confirmation: String,
+    )
+
+    internal class RemovalException(directory: String, branch: String, cause: Exception) : IOException(
+        "Worktree was removed at $directory, but deletion of local branch '$branch' did not complete: ${cause.message}. " +
+            "Inspect repository state before retrying; no remote branch was deleted.",
+        cause,
     )
 
     internal data class CreationPlan(
@@ -158,7 +179,11 @@ internal object GitWorktrees {
         }
     }
 
-    suspend fun previewRemove(repositoryDirectory: String, directory: String): RemovalPlan = withContext(Dispatchers.IO) {
+    suspend fun previewRemove(
+        repositoryDirectory: String,
+        directory: String,
+        options: RemovalOptions = RemovalOptions(),
+    ): RemovalPlan = withContext(Dispatchers.IO) {
         val repository = repositoryPath(repositoryDirectory)
         val supplied = Path.of(directory)
         require(supplied.isAbsolute) { "Worktree directory must be absolute" }
@@ -173,7 +198,8 @@ internal object GitWorktrees {
             blockedCodes.add(code)
             blocked.add(reason)
         }
-        val state = mutableListOf(repository.toString(), target.toString())
+        val state = mutableListOf(repository.toString(), target.toString(),
+            options.deleteLocalBranch.toString(), options.deleteLocalChanges.toString())
         suspend fun observe(
             description: String,
             failureCode: RemovalBlockReason,
@@ -211,8 +237,92 @@ internal object GitWorktrees {
         if (entry?.bare == true) block(RemovalBlockReason.BARE_REPOSITORY, "Bare repositories cannot be removed")
         if (entry?.locked != null) block(RemovalBlockReason.LOCKED, "Worktree is locked: ${entry.locked}")
         if (entry?.prunable != null) block(RemovalBlockReason.PRUNABLE, "Worktree is prunable: ${entry.prunable}")
+        if (options.deleteLocalBranch) {
+            if (entry?.branch == null) block(RemovalBlockReason.BRANCH_REQUIRED, "A detached worktree has no local branch to delete")
+            val otherCheckouts = entries.filter { it.branch != null && it.branch == entry?.branch && it.directory != target.toString() }
+            state.addAll(otherCheckouts.map { it.directory })
+            if (otherCheckouts.isNotEmpty()) {
+                block(RemovalBlockReason.BRANCH_CHECKED_OUT, "Local branch is checked out in another worktree: ${otherCheckouts.joinToString { it.directory }}")
+            }
+        }
+        var remoteBranchAbsent = false
+        var remoteStateKnown = false
+        var remoteBranchDetails = "No attached local branch"
+        if (entry?.branch != null) {
+            remoteBranchDetails = "Remote branch absence could not be verified"
+            try {
+                val config = git(repository, "config", "--null", "--list").split('\u0000').filter { it.isNotEmpty() }.map {
+                    val separator = it.indexOf('\n')
+                    if (separator < 0) it to "" else it.substring(0, separator) to it.substring(separator + 1)
+                }
+                val branchSection = "branch.${entry.branch}"
+                val branchPrefix = "$branchSection."
+                state.addAll(config.filter { (key, _) -> key.substringBeforeLast('.') == branchSection ||
+                    key.startsWith("remote.") || key.startsWith("url.") }
+                    .map { (key, value) -> "$key\n$value" })
+                val remotes = git(repository, "remote").lineSequence().filter { it.isNotEmpty() }.sorted().toList()
+                state.add(remotes.joinToString("\u0000"))
+                val upstreamRemotes = config.filter { it.first == "${branchPrefix}remote" }.map { it.second }
+                val upstreamRefs = config.filter { it.first == "${branchPrefix}merge" }.map { it.second }
+                val queries = if (upstreamRemotes.isNotEmpty() || upstreamRefs.isNotEmpty()) {
+                    val remote = upstreamRemotes.singleOrNull() ?: throw IOException("Ambiguous upstream remote")
+                    val ref = upstreamRefs.singleOrNull() ?: throw IOException("Ambiguous upstream ref")
+                    if (remote == ".") {
+                        // A local upstream is not evidence about any remote branch.
+                        remotes.map { it to "refs/heads/${entry.branch}" }
+                    } else {
+                        if (remote !in remotes) throw IOException("Upstream remote is not configured")
+                        if (!ref.startsWith("refs/heads/")) throw IOException("Upstream is not a remote branch")
+                        git(repository, "check-ref-format", ref)
+                        listOf(remote to ref)
+                    }
+                } else {
+                    remotes.map { it to "refs/heads/${entry.branch}" }
+                }
+                if (queries.isEmpty()) {
+                    remoteBranchDetails = "No configured remotes; remote branch absence cannot be verified"
+                } else {
+                    val details = mutableListOf<String>()
+                    var absent = true
+                    for ((remote, ref) in queries) {
+                        state.add(remote)
+                        state.add(ref)
+                        remoteBranchDetails = "Remote branch absence could not be verified for $remote: $ref"
+                        state.add(git(repository, "remote", "get-url", "--all", "--", remote))
+                        val output = git(repository, "ls-remote", "--refs", "--", remote, ref)
+                        state.add(output)
+                        val heads = output.lineSequence().filter { it.isNotEmpty() }.map { line ->
+                            val fields = line.split('\t')
+                            if (fields.size != 2 || fields[1] != ref || (fields[0].length != 40 && fields[0].length != 64) ||
+                                fields[0].any { it !in '0'..'9' && it !in 'a'..'f' && it !in 'A'..'F' }) {
+                                throw IOException("Remote returned an invalid branch advertisement")
+                            }
+                            fields[0]
+                        }.toList()
+                        if (heads.size > 1) throw IOException("Remote returned duplicate branch advertisements")
+                        if (heads.isNotEmpty()) absent = false
+                        details.add("$remote: $ref ${heads.singleOrNull()?.let { "exists at $it" } ?: "is absent"}")
+                    }
+                    remoteBranchAbsent = absent
+                    remoteStateKnown = true
+                    remoteBranchDetails = details.joinToString("; ")
+                }
+            } catch (_: IOException) {
+                // An offline remote must not prevent the default operation, which retains the branch.
+                state.add("remote-absence:unknown")
+            }
+            if (options.deleteLocalBranch && !remoteBranchAbsent) {
+                val code = if (remoteStateKnown) RemovalBlockReason.REMOTE_BRANCH_PRESENT else RemovalBlockReason.REMOTE_BRANCH_UNKNOWN
+                block(code, "Local branch deletion requires freshly verified remote branch absence: $remoteBranchDetails")
+            }
+        }
+        state.add(remoteBranchAbsent.toString())
+        state.add(remoteBranchDetails)
         val tracked = mutableListOf<String>()
         val untracked = mutableListOf<String>()
+        val ignored = mutableListOf<String>()
+        val changedPaths = mutableSetOf<String>()
+        var unretained = emptyList<String>()
         var unpushed: Int? = null
         var unsafe: Int? = null
         var historyKnown = false
@@ -238,21 +348,106 @@ internal object GitWorktrees {
                     }
                     val code = record.substring(0, 2)
                     val path = record.substring(3)
-                    if (code == "??" || code == "!!") untracked.add(path) else tracked.add(record)
+                    when (code) {
+                        "??" -> untracked.add(path)
+                        "!!" -> ignored.add(path)
+                        else -> tracked.add(record)
+                    }
+                    changedPaths.add(path)
                     if ('R' in code || 'C' in code) {
                         if (index >= records.lastIndex) {
                             block(RemovalBlockReason.STATUS_UNKNOWN, "Worktree status is unknown: incomplete rename")
                             break
                         }
-                        tracked.add(records[index++])
+                        val source = records[index++]
+                        tracked.add(source)
+                        changedPaths.add(source)
                     }
                 }
                 if (status.isNotEmpty() && !status.endsWith('\u0000')) {
                     block(RemovalBlockReason.STATUS_UNKNOWN, "Worktree status is unknown: incomplete Git output")
                 }
+                observe("Worktree contents", RemovalBlockReason.STATUS_UNKNOWN) {
+                    // Index object IDs bind staged bytes as well as the on-disk bytes below.
+                    state.add(git(target, "ls-files", "--stage", "-z"))
+                    val contents = sortedSetOf<Path>()
+                    val ignoredRoots = ignored.toList()
+                    ignored.clear()
+                    for (name in changedPaths) {
+                        val path = target.resolve(name).normalize()
+                        if (!path.startsWith(target) || path == target) throw IOException("Git returned an unsafe file path")
+                        var parent = path.parent
+                        while (parent != target) {
+                            if (Files.isSymbolicLink(parent)) throw IOException("Changed path traverses a symlink")
+                            parent = parent.parent
+                        }
+                        val paths = if (Files.isDirectory(path, NOFOLLOW_LINKS)) {
+                            Files.walk(path).use { paths ->
+                                try {
+                                    paths.toList()
+                                } catch (error: java.io.UncheckedIOException) {
+                                    throw IOException("Cannot inspect directory: ${target.relativize(path)}", error)
+                                }
+                            }
+                        } else listOf(path)
+                        contents.addAll(paths)
+                        if (name in ignoredRoots) {
+                            ignored.addAll(paths.map {
+                                target.relativize(it).toString() + if (Files.isDirectory(it, NOFOLLOW_LINKS)) "/" else ""
+                            })
+                        }
+                    }
+                    ignored.sort()
+                    val digest = MessageDigest.getInstance("SHA-256")
+                    fun record(value: String) {
+                        val bytes = value.toByteArray(Charsets.UTF_8)
+                        digest.update("${bytes.size}:".toByteArray(Charsets.UTF_8))
+                        digest.update(bytes)
+                    }
+                    val buffer = ByteArray(8192)
+                    for (path in contents) {
+                        record(target.relativize(path).toString())
+                        val attributes = try {
+                            Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+                        } catch (_: NoSuchFileException) {
+                            record("missing")
+                            continue
+                        }
+                        when {
+                            attributes.isSymbolicLink -> {
+                                record("symlink")
+                                record(Files.readSymbolicLink(path).toString())
+                            }
+                            attributes.isDirectory -> record("directory")
+                            attributes.isRegularFile -> {
+                                record("file:${attributes.size()}")
+                                var size = 0L
+                                Files.newInputStream(path, NOFOLLOW_LINKS).use { input ->
+                                    while (true) {
+                                        currentCoroutineContext().ensureActive()
+                                        val count = input.read(buffer)
+                                        if (count < 0) break
+                                        digest.update(buffer, 0, count)
+                                        size += count
+                                    }
+                                }
+                                val after = Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+                                if (size != attributes.size() || attributes.size() != after.size() ||
+                                    attributes.lastModifiedTime() != after.lastModifiedTime() || attributes.fileKey() != after.fileKey()) {
+                                    throw IOException("File changed while its contents were inspected")
+                                }
+                            }
+                            else -> throw IOException("Cannot fingerprint special file: ${target.relativize(path)}")
+                        }
+                    }
+                    digest.digest().joinToString("") { "%02x".format(it) }
+                }
             }
-            if (tracked.isNotEmpty()) block(RemovalBlockReason.TRACKED_CHANGES, "Worktree has tracked changes")
-            if (untracked.isNotEmpty()) block(RemovalBlockReason.UNTRACKED_FILES, "Worktree has untracked or ignored files")
+            if (!options.deleteLocalChanges) {
+                if (tracked.isNotEmpty()) block(RemovalBlockReason.TRACKED_CHANGES, "Worktree has tracked changes")
+                if (untracked.isNotEmpty()) block(RemovalBlockReason.UNTRACKED_FILES, "Worktree has untracked files")
+                if (ignored.isNotEmpty()) block(RemovalBlockReason.IGNORED_FILES, "Worktree has ignored files")
+            }
             val history = observe("Commit history", RemovalBlockReason.HISTORY_UNKNOWN) {
                 val head = git(target, "rev-parse", "--verify", "HEAD^{commit}").trim()
                 val branch = git(target, "rev-parse", "--symbolic-full-name", "HEAD").trim()
@@ -262,26 +457,40 @@ internal object GitWorktrees {
                 state.add(head)
                 state.add(branch)
                 // Only persistent refs retain commits: another worktree's HEAD or a reflog does not.
-                val refs = git(repository, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(upstream)")
-                state.add(refs)
+                val refs = git(repository, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(upstream)%00%(symref)")
+                // Bind only branch/upstream refs and retention results: deleting an unrelated
+                // branch in the same approved batch must not invalidate this target.
                 val refRecords = refs.lineSequence().filter { it.isNotEmpty() }.map { it.split('\u0000') }.toList()
-                val persistentRefs = refRecords.map { it.first() }.filter { ref ->
-                    !ref.startsWith("refs/bisect/") && !ref.startsWith("refs/worktree/") && !ref.startsWith("refs/rewritten/")
-                }
-                fun count(output: String): Int = output.trim().toIntOrNull()?.takeIf { it >= 0 }
-                    ?: throw IOException("Git returned an invalid commit count")
-                unsafe = count(git(target, "rev-list", "--count", "HEAD", "--not", *persistentRefs.toTypedArray(), "--"))
                 val branchRef = entry.branch?.let { "refs/heads/$it" }
-                val upstream = refRecords.firstOrNull { it.firstOrNull() == branchRef }
-                    ?.getOrNull(2)?.takeIf { it.isNotEmpty() }
-                unpushed = upstream?.let { count(git(target, "rev-list", "--count", "$it..HEAD", "--")) }
-                "${unsafe}:${unpushed}"
+                val branchRecord = refRecords.firstOrNull { it.firstOrNull() == branchRef }
+                if (branchRef != null && (branchRecord?.getOrNull(1) != head || !branchRecord?.getOrNull(3).isNullOrEmpty())) {
+                    throw IOException("Local branch changed or is symbolic")
+                }
+                // Symbolic aliases do not retain objects after their target branch is deleted.
+                val retainedRefs = refRecords.filter { it.getOrNull(3).isNullOrEmpty() }.map { it.first() }.filter { ref ->
+                    ref != branchRef && !ref.startsWith("refs/bisect/") &&
+                        !ref.startsWith("refs/worktree/") && !ref.startsWith("refs/rewritten/")
+                }
+                unretained = git(target, "--no-replace-objects", "rev-list", "HEAD", "--not", *retainedRefs.toTypedArray(), "--")
+                    .lineSequence().filter { it.isNotEmpty() }.toList()
+                unsafe = if (options.deleteLocalBranch || branchRef == null) unretained.size else 0
+                val upstream = branchRecord?.getOrNull(2)?.takeIf { it.isNotEmpty() }
+                state.add(branchRecord?.joinToString("\u0000").orEmpty())
+                state.add(refRecords.firstOrNull { it.firstOrNull() == upstream }?.joinToString("\u0000").orEmpty())
+                unpushed = when {
+                    upstream == null -> null
+                    remoteBranchAbsent && refRecords.none { record -> record.first() == upstream } -> null
+                    else -> git(target, "--no-replace-objects", "rev-list", "--count", "$upstream..HEAD", "--").trim().toIntOrNull()?.takeIf { it >= 0 }
+                        ?: throw IOException("Git returned an invalid commit count")
+                }
+                "${unsafe}:${unpushed}:${unretained.joinToString(",")}"
             }
             historyKnown = history != null
             if (!historyKnown) {
                 unsafe = null
                 unpushed = null
-            } else if (unsafe != 0) {
+                unretained = emptyList()
+            } else if (unsafe != 0 && !(options.deleteLocalBranch && entry.branch != null)) {
                 block(RemovalBlockReason.UNRETAINED_COMMITS, "Worktree has $unsafe commits not retained by persistent refs")
             }
         }
@@ -293,18 +502,47 @@ internal object GitWorktrees {
             digest.update("${bytes.size}:".toByteArray(Charsets.UTF_8))
             digest.update(bytes)
         }
-        RemovalPlan(repository.toString(), target.toString(), entry?.head, entry?.branch, tracked, untracked,
-            unpushed, historyKnown, unsafe, blocked, blockedCodes, digest.digest().joinToString("") { "%02x".format(it) })
+        RemovalPlan(
+            repositoryDirectory = repository.toString(), directory = target.toString(), head = entry?.head, branch = entry?.branch,
+            options = options, trackedChanges = tracked, untrackedFiles = untracked, ignoredFiles = ignored,
+            remoteBranchAbsent = remoteBranchAbsent, remoteBranchDetails = remoteBranchDetails, unretainedCommitIds = unretained,
+            unpushedCommits = unpushed, historyKnown = historyKnown, unsafeCommits = unsafe,
+            blockedReasons = blocked, blockedCodes = blockedCodes, confirmation = digest.digest().joinToString("") { "%02x".format(it) },
+        )
     }
 
     suspend fun remove(plan: RemovalPlan, confirmation: String): String = withContext(Dispatchers.IO) {
         require(confirmation.isNotEmpty() && confirmation == plan.confirmation) { "Confirmation does not match the approved removal preview" }
         require(plan.blockedCodes.isEmpty()) { "Removal is blocked: ${plan.blockedReasons.joinToString("; ")}" }
-        val current = previewRemove(plan.repositoryDirectory, plan.directory)
+        val current = previewRemove(plan.repositoryDirectory, plan.directory, plan.options)
         require(current == plan) { "Removal state changed; obtain and approve a new preview" }
-        require(current.blockedCodes.isEmpty() && current.historyKnown && current.unsafeCommits == 0) { "Removal safety could not be established" }
+        require(current.blockedCodes.isEmpty() && current.historyKnown &&
+            (current.unsafeCommits == 0 || current.options.deleteLocalBranch && current.branch != null) &&
+            (!current.options.deleteLocalBranch || current.remoteBranchAbsent)) { "Removal safety could not be established" }
         currentCoroutineContext().ensureActive()
-        git(Path.of(current.repositoryDirectory), "worktree", "remove", "--", current.directory)
+        val repository = Path.of(current.repositoryDirectory)
+        val arguments = mutableListOf("worktree", "remove")
+        if (current.options.deleteLocalChanges) arguments.add("--force")
+        arguments.addAll(listOf("--", current.directory))
+        git(repository, *arguments.toTypedArray())
+        if (current.options.deleteLocalBranch) {
+            val branch = requireNotNull(current.branch)
+            try {
+                val inventory = parse(git(repository, "worktree", "list", "--porcelain", "-z"))
+                check(inventory.none { it.branch == branch }) { "Local branch is now checked out in another worktree" }
+                // Compare-and-delete prevents a concurrent new tip from being discarded.
+                git(repository, "update-ref", "--no-deref", "-d", "refs/heads/$branch", requireNotNull(current.head))
+                val branchConfig = git(repository, "config", "--local", "--null", "--list")
+                if (branchConfig.split('\u0000').any { it.substringBefore('\n').substringBeforeLast('.') == "branch.$branch" }) {
+                    git(repository, "config", "--local", "--remove-section", "branch.$branch")
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                cancelled.addSuppressed(RemovalException(current.directory, branch, cancelled))
+                throw cancelled
+            } catch (error: Exception) {
+                throw RemovalException(current.directory, branch, error)
+            }
+        }
         current.directory
     }
 

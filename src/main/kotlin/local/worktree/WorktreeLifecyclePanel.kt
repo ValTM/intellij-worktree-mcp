@@ -71,17 +71,6 @@ import javax.swing.table.DefaultTableCellRenderer
 import javax.swing.table.TableCellEditor
 import javax.swing.table.TableCellRenderer
 
-/** Cleanup is stricter than individually approved removal: unknown upstream state is retained. */
-internal fun lifecycleCleanupEligible(status: WorktreeDisplayStatus, preview: JsonObject): Boolean =
-    status.mergedHeadCovered && status.error == null && preview.get("status")?.asString == "preview" &&
-        preview.get("open")?.asBoolean == false && preview.get("historyKnown")?.asBoolean == true &&
-        preview.get("unsafeCommits")?.takeUnless { it.isJsonNull }?.asInt == 0 &&
-        preview.get("unpushedCommits")?.takeUnless { it.isJsonNull }?.asInt == 0 &&
-        preview.getAsJsonArray("trackedChanges")?.isEmpty == true &&
-        preview.getAsJsonArray("untrackedFiles")?.isEmpty == true &&
-        preview.getAsJsonArray("blockedReasons")?.isEmpty == true &&
-        preview.getAsJsonArray("blockedCodes")?.isEmpty == true
-
 internal class WorktreeLifecyclePanel(private val project: Project) : JBPanel<WorktreeLifecyclePanel>(BorderLayout()), Disposable, UiDataProvider {
     private data class Row(val entry: GitWorktree, var status: WorktreeDisplayStatus? = null, var failure: String? = null)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.EDT)
@@ -229,8 +218,8 @@ internal class WorktreeLifecyclePanel(private val project: Project) : JBPanel<Wo
         addSeparator()
         add(ActionUtil.wrap("Git.WorkingTrees.ToggleLock"))
         add(ActionUtil.wrap("Git.WorkingTrees.Prune"))
-        action("Remove Worktrees…", "Preview exact selected directories; retain branches and block unsafe or open worktrees", AllIcons.General.Delete, { selected().isNotEmpty() }, { remove(cleanup = false) })
-        action("Cleanup Merged…", "Preview only merged-HEAD-proven, clean, closed worktrees with known retained history; never delete branches", AllIcons.Actions.GC, { repository() != null && rows.isNotEmpty() }, { remove(cleanup = true) })
+        action("Remove Worktrees…", "Preview selected directories and optional local branch or local change deletion", AllIcons.General.Delete, { selected().isNotEmpty() }, { remove(cleanup = false) })
+        action("Cleanup Worktrees…", "Select safe worktrees or explicitly opt into closed-unmerged and local data deletion", AllIcons.Actions.GC, { repository() != null && rows.isNotEmpty() }, { remove(cleanup = true) })
         addSeparator()
         action("Refresh", "Fetch remotes and refresh inventory, sync and provider review data", AllIcons.Actions.Refresh, { true }) {
             updateRepositories()
@@ -320,7 +309,7 @@ internal class WorktreeLifecyclePanel(private val project: Project) : JBPanel<Wo
             }
             withContext(Dispatchers.EDT) {
                 message.text = fetchFailure?.let { "Refresh failed: $it. Showing local/cached status; Refresh retries." }
-                    ?: "${entries.size} worktrees · ${if (fetch) "Refreshed" else "Local/cached status; Refresh fetches remotes"} · Branches are never deleted"
+                    ?: "${entries.size} worktrees · ${if (fetch) "Refreshed" else "Local/cached status; Refresh fetches remotes"} · Branch deletion requires explicit opt-in"
                 message.toolTipText = message.text
             }
         }
@@ -375,66 +364,64 @@ internal class WorktreeLifecyclePanel(private val project: Project) : JBPanel<Wo
     private fun remove(cleanup: Boolean) {
         val repository = repository() ?: return
         val selectedDirectories = selected().map { it.entry.directory }
-        task(if (cleanup) "Refreshing merge proof and preparing cleanup preview…" else "Preparing removal preview…") {
-            if (cleanup) WorktreeStatusReader.refresh(project, repository)
-            val inventory = GitWorktrees.discover(repository).associateBy { it.directory }
-            val directories = if (cleanup) inventory.keys.toList() else selectedDirectories
-            val preview = json(tools.worktree_remove_preview(repository, directories))
-            val plans = preview.getAsJsonArray("results").map { it.asJsonObject }
-            val statuses = if (cleanup) plans.associate { plan ->
-                val directory = plan.get("directory").asString
-                directory to inventory[directory]?.let { WorktreeStatusReader.read(project, repository, it) }
-            } else emptyMap()
-            val approved = plans.filter { plan ->
-                plan.get("status")?.asString == "preview" && (!cleanup ||
-                    statuses[plan.get("directory").asString]?.let { lifecycleCleanupEligible(it, plan) } == true)
-            }
-            val text = buildString {
+        task(if (cleanup) "Preparing cleanup preview…" else "Preparing removal preview…") {
+            val directories = if (cleanup) GitWorktrees.discover(repository).map { it.directory } else selectedDirectories
+            val preview = json(tools.worktree_remove_preview(repository, directories, cleanup = cleanup))
+            val plans = preview.getAsJsonArray("results")?.map { it.asJsonObject }.orEmpty()
+            fun previewText(plans: List<JsonObject>): String = buildString {
                 appendLine("Repository: $repository")
-                appendLine(if (cleanup) "Select eligible directories below. Only selected worktrees will be removed. Local and remote branches are retained. No remote deletion. Open projects are never closed here."
-                    else "Only the following approved worktree directories will be removed. Local and remote branches are retained. No remote deletion. Open projects are never closed here.")
-                if (cleanup) appendLine("Cleanup additionally requires merged proof covering the exact current HEAD, clean files and known upstream/history. Proof and removal safety are rechecked before each deletion.")
+                appendLine("Only selected worktrees are deleted. Local branches and local changes are retained unless separately checked. Remote branches are never deleted. Open projects are never closed here.")
+                appendLine("Deletion is irreversible: deleted local changes and commits losing their last retaining ref may not be recoverable.")
                 for (plan in plans) {
                     appendLine()
-                    appendLine(if (plan in approved) "${if (cleanup) "ELIGIBLE" else "REMOVE"}: ${plan.get("directory").asString}" else "RETAIN: ${plan.get("directory")?.asString ?: "unknown"}")
-                    appendLine(removalText(plan))
-                    if (cleanup && plan !in approved) appendLine("Not eligible for proven merged cleanup: ${statuses[plan.get("directory")?.asString]?.reviewDetails ?: "merge or status evidence unknown"}")
+                    appendLine("Directory: ${plan.get("directory") ?: "unknown"}")
+                    appendLine(lifecycleRemovalText(plan))
                 }
             }
-            if (approved.isEmpty()) {
-                withContext(Dispatchers.EDT) { PreviewDialog(project, "No Safe Worktrees to Remove", text, null).show(); message.text = "Nothing removed; no eligible worktrees" }
+            if (plans.none { it.get("selectable")?.asBoolean == true }) {
+                withContext(Dispatchers.EDT) {
+                    PreviewDialog(project, "No Selectable Worktrees", previewText(plans) + if (plans.isEmpty()) "\n$preview" else "", null).show()
+                    message.text = "Nothing deleted; no selectable worktrees"
+                }
                 return@task
             }
-            val chosen = if (cleanup) withContext(Dispatchers.EDT) {
-                if (project.isDisposed) emptyList() else {
-                    val dialog = WorktreeLifecycleCleanupDialog(project, text, approved)
-                    if (dialog.showAndGet()) dialog.selectedPlans else emptyList()
+            val selection = withContext(Dispatchers.EDT) {
+                if (project.isDisposed) null else {
+                    val dialog = WorktreeLifecycleCleanupDialog(project, previewText(plans), plans, cleanup)
+                    if (dialog.showAndGet()) dialog.selection else null
                 }
-            } else if (confirm("Remove Worktrees", text, "Remove ${approved.size} Worktree(s)")) approved else emptyList()
-            if (chosen.isEmpty()) {
-                withContext(Dispatchers.EDT) { message.text = "Removal cancelled; nothing changed" }
+            }
+            if (selection == null) {
+                withContext(Dispatchers.EDT) { message.text = "Deletion cancelled; nothing changed" }
                 return@task
             }
-            if (cleanup) WorktreeStatusReader.refresh(project, repository)
-            val outcomes = mutableListOf<String>()
-            for (plan in chosen) {
-                val directory = plan.get("directory").asString
-                if (cleanup) {
-                    val current = GitWorktrees.discover(repository).singleOrNull { it.directory == directory }
-                    val status = current?.let { WorktreeStatusReader.read(project, repository, it) }
-                    val fresh = json(tools.worktree_remove_preview(repository, listOf(directory))).getAsJsonArray("results").single().asJsonObject
-                    if (current?.head != plan.get("head")?.takeUnless { it.isJsonNull }?.asString || status == null ||
-                        !lifecycleCleanupEligible(status, fresh) || fresh.get("confirmation")?.asString != plan.get("confirmation")?.asString) {
-                        outcomes.add("Retained $directory: merge proof or removal state changed; obtain a new preview")
-                        continue
-                    }
-                }
-                val result = json(tools.worktree_remove(repository, listOf(directory), listOf(plan.get("confirmation").asString)))
-                outcomes.add("$directory: ${result.getAsJsonArray("results").joinToString { outcome(it.asJsonObject) }}")
+            val chosenDirectories = selection.plans.map { it.get("directory").asString }
+            val freshPreview = json(tools.worktree_remove_preview(
+                repository, chosenDirectories, cleanup, selection.deleteLocalBranches,
+                selection.deleteLocalChanges, selection.includeClosedUnmerged,
+            ))
+            val fresh = freshPreview.getAsJsonArray("results")?.map { it.asJsonObject }.orEmpty()
+            val ready = fresh.size == chosenDirectories.size && fresh.all {
+                it.get("status")?.asString == "preview" && it.get("confirmation")?.isJsonPrimitive == true
             }
+            if (!ready) {
+                withContext(Dispatchers.EDT) {
+                    PreviewDialog(project, "Deletion Blocked — Review Fresh Preview", previewText(fresh) + if (fresh.isEmpty()) "\n$freshPreview" else "", null).show()
+                    message.text = "Nothing deleted; review blockers and select the required options in a new preview"
+                }
+                return@task
+            }
+            if (!confirm("Confirm Worktree Deletion", previewText(fresh), "Delete ${fresh.size} Worktree(s)")) {
+                withContext(Dispatchers.EDT) { message.text = "Deletion cancelled; nothing changed" }
+                return@task
+            }
+            val result = json(tools.worktree_remove(
+                repository, chosenDirectories, fresh.map { it.get("confirmation").asString }, cleanup,
+                selection.deleteLocalBranches, selection.deleteLocalChanges, selection.includeClosedUnmerged,
+            ))
             withContext(Dispatchers.EDT) {
-                PreviewDialog(project, "Worktree Removal Results", outcomes.joinToString("\n\n"), null).show()
-                message.text = "Removal completed; inspect per-directory results. Branches retained."
+                PreviewDialog(project, "Worktree Removal Results", result.toString(), null).show()
+                message.text = "Deletion completed; inspect per-directory results."
             }
             loadInventory(repository)
         }
@@ -458,14 +445,6 @@ internal class WorktreeLifecyclePanel(private val project: Project) : JBPanel<Wo
         Create this exact checkout without opening a project, running installers or Git hooks.
         If the destination, branch or starting commit changes, creation is refused and needs a new preview.
     """.trimIndent()
-
-    private fun removalText(plan: JsonObject): String = buildString {
-        appendLine("Branch: ${plan.get("branch") ?: "unknown"} · HEAD: ${plan.get("head") ?: "unknown"}")
-        appendLine("History known: ${plan.get("historyKnown") ?: "unknown"} · Unretained commits: ${plan.get("unsafeCommits") ?: "unknown"} · Unpushed commits: ${plan.get("unpushedCommits") ?: "unknown"} · Open: ${plan.get("open") ?: "unknown"}")
-        appendLine("Tracked changes: ${plan.get("trackedChanges") ?: "unknown"}")
-        appendLine("Untracked / ignored files: ${plan.get("untrackedFiles") ?: "unknown"}")
-        append("Blockers: ${plan.get("blockedReasons") ?: plan.get("reason") ?: "unknown"}")
-    }
 
     private inner class RowRenderer : DefaultTableCellRenderer() {
         override fun getTableCellRendererComponent(table: JTable, value: Any?, selected: Boolean, focus: Boolean, row: Int, column: Int): Component {
@@ -526,38 +505,110 @@ private class PreviewDialog(project: Project, title: String, text: String, confi
     override fun getPreferredFocusedComponent(): JComponent = details
 }
 
-internal class WorktreeLifecycleCleanupDialog(project: Project, text: String, candidates: List<JsonObject>) : DialogWrapper(project) {
+internal fun lifecycleRemovalText(plan: JsonObject): String = buildString {
+    appendLine("Status: ${plan.get("status") ?: "unknown"} · Selectable: ${plan.get("selectable") ?: "unknown"} · Safe: ${plan.get("safe") ?: "unknown"}")
+    appendLine("Branch: ${plan.get("branch") ?: "unknown"} · HEAD: ${plan.get("head") ?: "unknown"} · Open: ${plan.get("open") ?: "unknown"}")
+    appendLine("Cleanup: ${plan.get("cleanupKind") ?: "NONE"} · ${plan.get("cleanupDetails") ?: "unknown"}")
+    appendLine("Remote branch absent: ${plan.get("remoteBranchAbsent") ?: "unknown"} · ${plan.get("remoteBranchDetails") ?: "unknown"}")
+    appendLine("History known: ${plan.get("historyKnown") ?: "unknown"} · Unretained commits: ${plan.get("unsafeCommits") ?: "unknown"} · Unpushed commits: ${plan.get("unpushedCommits") ?: "unknown"}")
+    appendLine("Commits losing retaining refs: ${plan.get("unretainedCommitIds") ?: "unknown"}")
+    appendLine("Tracked changes: ${plan.get("trackedChanges") ?: "unknown"}")
+    appendLine("Untracked files: ${plan.get("untrackedFiles") ?: "unknown"}")
+    appendLine("Ignored files: ${plan.get("ignoredFiles") ?: "unknown"}")
+    appendLine("Deletion options: ${plan.get("options") ?: "unknown"}")
+    append("Blockers: ${plan.get("blockedReasons") ?: plan.get("reason") ?: "unknown"} · Codes: ${plan.get("blockedCodes") ?: "unknown"}")
+}
+
+internal class WorktreeLifecycleCleanupDialog(
+    project: Project, text: String, candidates: List<JsonObject>, cleanup: Boolean = true,
+) : DialogWrapper(project) {
+    internal data class Choice(
+        val plan: JsonObject, val selected: JBCheckBox, val deleteLocalBranch: JBCheckBox, val deleteLocalChanges: JBCheckBox,
+    )
+    internal data class Selection(
+        val plans: List<JsonObject>, val deleteLocalBranches: List<String>,
+        val deleteLocalChanges: List<String>, val includeClosedUnmerged: List<String>,
+    )
     internal val choices = candidates.map { plan ->
-        plan to JBCheckBox("${plan.get("directory").asString} — ${plan.get("branch") ?: "detached"}", true).apply {
-            toolTipText = "Remove this directory only; preserve its branch. HEAD: ${plan.get("head") ?: "unknown"}"
-            addActionListener { isOKActionEnabled = selectedPlans.isNotEmpty() }
-        }
+        val directory = plan.get("directory").asString
+        val selectable = plan.get("selectable")?.asBoolean == true
+        Choice(
+            plan,
+            JBCheckBox("$directory — ${plan.get("branch") ?: "detached"} · ${plan.get("cleanupKind")?.asString ?: "NONE"}", selectable && plan.get("safe")?.asBoolean == true).apply {
+                isEnabled = selectable
+                toolTipText = lifecycleRemovalText(plan)
+                addActionListener { updateSelection() }
+            },
+            JBCheckBox("Delete local branch").apply { accessibleContext.accessibleName = "Delete local branch for $directory" },
+            JBCheckBox("Delete local changes").apply { accessibleContext.accessibleName = "Delete local changes for $directory" },
+        )
     }
-    val selectedPlans: List<JsonObject> get() = choices.filter { it.second.isSelected }.map { it.first }
+    val selectedPlans: List<JsonObject> get() = choices.filter { it.selected.isEnabled && it.selected.isSelected }.map { it.plan }
+    internal val deleteSelectedAction get() = okAction
+    val selection: Selection get() {
+        val selected = choices.filter { it.selected.isEnabled && it.selected.isSelected }
+        return Selection(
+            selected.map { it.plan },
+            selected.filter { it.deleteLocalBranch.isEnabled && it.deleteLocalBranch.isSelected }.map { it.plan.get("directory").asString },
+            selected.filter { it.deleteLocalChanges.isSelected }.map { it.plan.get("directory").asString },
+            selected.filter { it.plan.get("cleanupKind")?.asString == "CLOSED_UNMERGED" }.map { it.plan.get("directory").asString },
+        )
+    }
+    internal val selectSafe = JButton("Select safe worktrees").apply { addActionListener {
+        choices.forEach { it.selected.isSelected = it.selected.isEnabled && it.plan.get("safe")?.asBoolean == true }
+        updateSelection()
+    } }
+    internal val selectAll = JButton("Select all worktrees").apply { addActionListener {
+        choices.forEach { it.selected.isSelected = it.selected.isEnabled }
+        updateSelection()
+    } }
+    internal val clearSelection = JButton("Clear selection").apply { addActionListener {
+        choices.forEach { it.selected.isSelected = false }
+        updateSelection()
+    } }
     private val details = JTextArea(text).apply {
         isEditable = false
         lineWrap = true
         wrapStyleWord = true
         caretPosition = 0
         background = UIUtil.getPanelBackground()
-        accessibleContext.accessibleName = "Merged cleanup safety preview"
+        accessibleContext.accessibleName = "Worktree deletion safety preview"
     }
     init {
-        title = "Cleanup Merged Worktrees"
+        title = if (cleanup) "Cleanup Worktrees" else "Remove Worktrees"
         init()
-        setOKButtonText("Remove Selected Worktrees")
-        isOKActionEnabled = choices.isNotEmpty()
+        rootPane?.defaultButton = selectSafe
+        updateSelection()
+    }
+    private fun updateSelection() {
+        choices.forEach {
+            val selected = it.selected.isEnabled && it.selected.isSelected
+            it.deleteLocalBranch.isEnabled = selected && it.plan.get("remoteBranchAbsent")?.asBoolean == true &&
+                it.plan.get("branch")?.takeUnless { branch -> branch.isJsonNull } != null
+            it.deleteLocalChanges.isEnabled = selected
+        }
+        val count = selectedPlans.size
+        setOKButtonText("Delete selected worktrees ($count)…")
+        isOKActionEnabled = count > 0
     }
     override fun createCenterPanel(): JComponent = JPanel(BorderLayout(0, JBUI.scale(8))).apply {
         val selection = JPanel().apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
-            add(JBLabel("Select eligible worktrees to remove (branches retained):"))
-            choices.forEach { add(it.second) }
+            add(JPanel().apply { add(selectSafe); add(selectAll); add(clearSelection) })
+            add(JBLabel("Selection never enables branch or local change deletion. Continue to a fresh final preview."))
+            choices.forEach { choice ->
+                add(JPanel().apply {
+                    layout = BoxLayout(this, BoxLayout.Y_AXIS)
+                    border = JBUI.Borders.empty(4)
+                    add(choice.selected)
+                    add(JPanel().apply { add(choice.deleteLocalBranch); add(choice.deleteLocalChanges) })
+                })
+            }
         }
-        add(JBScrollPane(selection).apply { preferredSize = JBUI.size(720, 130) }, BorderLayout.NORTH)
-        add(JBScrollPane(details).apply { preferredSize = JBUI.size(720, 300) }, BorderLayout.CENTER)
+        add(JBScrollPane(selection).apply { preferredSize = JBUI.size(860, 240) }, BorderLayout.NORTH)
+        add(JBScrollPane(details).apply { preferredSize = JBUI.size(860, 300) }, BorderLayout.CENTER)
     }
-    override fun getPreferredFocusedComponent(): JComponent = choices.firstOrNull()?.second ?: details
+    override fun getPreferredFocusedComponent(): JComponent = selectSafe
 }
 
 private class CreateDialog(project: Project, repository: String) : DialogWrapper(project) {
