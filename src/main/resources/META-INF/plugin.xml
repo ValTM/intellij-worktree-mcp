@@ -51,6 +51,16 @@
                             preloaderClassName="local.worktree.WorktreeLifecyclePreloader"
                             isInCommitToolWindow="false"/>
     </extensions>
+    <applicationListeners>
+        <listener class="local.worktree.WorktreeRemovalProjectListener"
+                  topic="com.intellij.openapi.project.ProjectCloseListener"/>
+        <listener class="local.worktree.WorktreeRemovalProjectListener"
+                  topic="com.intellij.openapi.project.impl.ProjectLifecycleListener"/>
+    </applicationListeners>
+    <projectListeners>
+        <listener class="local.worktree.WorktreeLifecycleRepositoryListener"
+                  topic="com.intellij.dvcs.repo.VcsRepositoryMappingListener"/>
+    </projectListeners>
     <actions>
         <action id="Worktree.ShowLifecycle"
                 class="local.worktree.ShowWorktreeLifecycleAction"

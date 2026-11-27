@@ -33,6 +33,23 @@ class GitWorktreeRemovalTest : HeavyPlatformTestCase() {
         }
     }
 
+    fun testFinalRemovalGuardRunsAfterValidationAndCanPreventDeletion() = runBlocking {
+        val repository = initializeRepository("repository")
+        val linked = addWorktree(repository, "feature", "linked")
+        val plan = GitWorktrees.previewRemove(repository.toString(), linked.toString())
+        var guarded = false
+        val guard: suspend () -> Unit = {
+            guarded = true
+            throw IllegalArgumentException("Project opened during revalidation")
+        }
+        assertFailsWith<IllegalArgumentException> { GitWorktrees.remove(plan, "wrong", guard) }
+        assertFalse(guarded)
+        assertFailsWith<IllegalArgumentException> { GitWorktrees.remove(plan, plan.confirmation, guard) }
+        assertTrue(guarded)
+        assertTrue(Files.isDirectory(linked))
+        assertEquals(plan.head, git(repository, "rev-parse", "refs/heads/feature").trim())
+    }
+
     fun testCleanLinkedRemovalPreservesBranchesAndUnrelatedWorktreesWithoutUpstream() = runBlocking {
         val repository = initializeRepository("repository with spaces\nand newline")
         val linked = addWorktree(repository, "feature", "linked with spaces\nand newline")
@@ -47,7 +64,6 @@ class GitWorktreeRemovalTest : HeavyPlatformTestCase() {
         assertEquals("feature", plan.branch)
         assertTrue(plan.trackedChanges.isEmpty())
         assertTrue(plan.untrackedFiles.isEmpty())
-        assertTrue(plan.ignoredFiles.isEmpty())
         assertEquals(RemovalOptions(), plan.options)
         assertFalse(plan.remoteBranchAbsent)
         assertEquals(listOf(head), plan.unretainedCommitIds)
@@ -82,6 +98,19 @@ class GitWorktreeRemovalTest : HeavyPlatformTestCase() {
         assertEquals(firstPlan.head, git(repository, "rev-parse", "refs/heads/first").trim())
         assertEquals(secondPlan.head, git(repository, "rev-parse", "refs/heads/second").trim())
         assertEquals(listOf(repository.toString()), GitWorktrees.discover(repository.toString()).map { it.directory })
+    }
+
+    fun testApprovedPreviewCannotAuthorizeRemovalAfterWorktreeLock() = runBlocking {
+        val repository = initializeRepository("repository")
+        val linked = addWorktree(repository, "feature", "linked")
+        val stale = GitWorktrees.previewRemove(repository.toString(), linked.toString())
+        assertTrue(stale.blockedCodes.isEmpty())
+        git(repository, "worktree", "lock", linked.toString())
+        val fresh = GitWorktrees.previewRemove(repository.toString(), linked.toString())
+        assertTrue(GitWorktrees.RemovalBlockReason.LOCKED in fresh.blockedCodes)
+        assertFailsWith<IllegalArgumentException> { GitWorktrees.remove(stale, stale.confirmation) }
+        assertTrue(Files.isDirectory(linked))
+        assertEquals(stale.head, git(repository, "rev-parse", "refs/heads/feature").trim())
     }
 
     fun testAheadOfUpstreamIsReportedButRetainedLocalBranchCanBeRemoved() = runBlocking {
@@ -128,7 +157,7 @@ class GitWorktreeRemovalTest : HeavyPlatformTestCase() {
         assertFailsWith<IllegalArgumentException> { GitWorktrees.previewRemove(repository.toString(), "relative") }
     }
 
-    fun testTrackedUntrackedAndIgnoredFilesAreReportedAndNeverRemoved() = runBlocking {
+    fun testTrackedAndUntrackedFilesAreReportedAndNeverRemovedByDefault() = runBlocking {
         val repository = initializeRepository("repository")
         val linked = addWorktree(repository, "feature", "linked")
         Files.writeString(linked.resolve("tracked.txt"), "changed\n")
@@ -139,10 +168,8 @@ class GitWorktreeRemovalTest : HeavyPlatformTestCase() {
         assertTrue(plan.trackedChanges.any { "tracked.txt" in it })
         assertTrue("untracked\nfile" in plan.untrackedFiles)
         assertFalse(plan.untrackedFiles.any { it.startsWith("ignored/") })
-        assertTrue("ignored/valuable.txt" in plan.ignoredFiles)
         assertTrue(RemovalBlockReason.TRACKED_CHANGES in plan.blockedCodes)
         assertTrue(RemovalBlockReason.UNTRACKED_FILES in plan.blockedCodes)
-        assertTrue(RemovalBlockReason.IGNORED_FILES in plan.blockedCodes)
         assertFailsWith<IllegalArgumentException> { GitWorktrees.remove(plan, plan.confirmation) }
         assertEquals("ignored but valuable\n", Files.readString(linked.resolve("ignored/valuable.txt")))
         // Even a caller-modified preview cannot bypass the freshly recomputed safety decision.
@@ -411,25 +438,21 @@ class GitWorktreeRemovalTest : HeavyPlatformTestCase() {
         assertEquals(plan.head, git(repository, "rev-parse", "refs/heads/feature").trim())
     }
 
-    fun testDirtyDeletionRequiresExactTrackedUntrackedIgnoredSymlinkAndIndexContents() = runBlocking {
+    fun testDirtyDeletionRequiresExactTrackedUntrackedSymlinkAndIndexContents() = runBlocking {
         val repository = initializeRepository("repository")
         val linked = addWorktree(repository, "feature", "linked")
         val external = Files.writeString(temporary.resolve("outside"), "valuable external content")
         val tracked = Files.writeString(linked.resolve("tracked.txt"), "first\n")
         val untracked = Files.writeString(linked.resolve("untracked"), "first\n")
-        Files.createDirectories(linked.resolve("ignored/nested"))
-        val ignored = Files.writeString(linked.resolve("ignored/nested/valuable"), "first\n")
-        val link = Files.createSymbolicLink(linked.resolve("ignored/link"), external)
+        val link = Files.createSymbolicLink(linked.resolve("untracked-link"), external)
         val options = RemovalOptions(deleteLocalChanges = true)
         var plan = GitWorktrees.previewRemove(repository.toString(), linked.toString(), options)
         assertTrue(plan.blockedReasons.toString(), plan.blockedCodes.isEmpty())
-        assertEquals(listOf("untracked"), plan.untrackedFiles)
-        assertTrue("ignored/nested/valuable" in plan.ignoredFiles)
-        assertTrue("ignored/link" in plan.ignoredFiles)
+        assertEquals(listOf("untracked", "untracked-link"), plan.untrackedFiles)
         assertFailsWith<IllegalArgumentException> {
             GitWorktrees.remove(plan.copy(options = RemovalOptions()), plan.confirmation)
         }
-        for (path in listOf(tracked, untracked, ignored)) {
+        for (path in listOf(tracked, untracked)) {
             Files.writeString(path, "other\n")
             assertFailsWith<IllegalArgumentException> { GitWorktrees.remove(plan, plan.confirmation) }
             assertTrue(Files.isDirectory(linked))
@@ -437,9 +460,6 @@ class GitWorktreeRemovalTest : HeavyPlatformTestCase() {
         }
         Files.delete(link)
         Files.createSymbolicLink(link, temporary.resolve("another"))
-        assertFailsWith<IllegalArgumentException> { GitWorktrees.remove(plan, plan.confirmation) }
-        plan = GitWorktrees.previewRemove(repository.toString(), linked.toString(), options)
-        Files.writeString(linked.resolve("ignored/nested/new"), "new ignored content")
         assertFailsWith<IllegalArgumentException> { GitWorktrees.remove(plan, plan.confirmation) }
         Files.writeString(tracked, "index-one\n")
         git(linked, "add", "tracked.txt")
@@ -532,20 +552,30 @@ class GitWorktreeRemovalTest : HeavyPlatformTestCase() {
         assertEquals("keep", git(repository, "config", "--get", "branch.feature.extra.description").trim())
     }
 
-    fun testIgnoredSymlinkDoesNotTraverseOrDiscardExternalDirectoryContents() = runBlocking {
+    fun testCleanWorktreeWithChangingIgnoredContentsIsRemovedWithoutForce() = runBlocking {
         val repository = initializeRepository("repository")
         val linked = addWorktree(repository, "feature", "linked")
         val external = Files.createDirectory(temporary.resolve("outside"))
         val valuable = Files.writeString(external.resolve("valuable"), "before")
         Files.createDirectory(linked.resolve("ignored"))
         Files.createSymbolicLink(linked.resolve("ignored/external"), external)
-        val options = RemovalOptions(deleteLocalChanges = true)
-        val plan = GitWorktrees.previewRemove(repository.toString(), linked.toString(), options)
-        assertTrue("ignored/external" in plan.ignoredFiles)
-        assertFalse(plan.ignoredFiles.any { "valuable" in it })
+        val ignored = Files.writeString(linked.resolve("ignored/cache"), "before")
+        val plan = GitWorktrees.previewRemove(repository.toString(), linked.toString())
+        assertEquals(RemovalOptions(), plan.options)
+        assertTrue(plan.trackedChanges.isEmpty())
+        assertTrue(plan.untrackedFiles.isEmpty())
+        assertTrue(plan.blockedReasons.toString(), plan.blockedCodes.isEmpty())
+        Files.writeString(ignored, "after")
+        Files.createDirectories(linked.resolve("ignored/nested"))
+        Files.writeString(linked.resolve("ignored/nested/new"), "new ignored content")
         Files.writeString(valuable, "after")
-        assertEquals(plan, GitWorktrees.previewRemove(repository.toString(), linked.toString(), options))
+        assertEquals(plan, GitWorktrees.previewRemove(repository.toString(), linked.toString()))
+        Files.delete(ignored)
+        Files.delete(linked.resolve("ignored/external"))
+        Files.createSymbolicLink(linked.resolve("ignored/external"), temporary.resolve("missing"))
+        assertEquals(plan, GitWorktrees.previewRemove(repository.toString(), linked.toString()))
         GitWorktrees.remove(plan, plan.confirmation)
+        assertFalse(Files.exists(linked))
         assertEquals("after", Files.readString(valuable))
     }
 

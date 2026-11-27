@@ -47,7 +47,6 @@ internal object GitWorktrees {
         HISTORY_UNKNOWN,
         TRACKED_CHANGES,
         UNTRACKED_FILES,
-        IGNORED_FILES,
         REMOTE_BRANCH_UNKNOWN,
         REMOTE_BRANCH_PRESENT,
         BRANCH_REQUIRED,
@@ -69,7 +68,6 @@ internal object GitWorktrees {
         val options: RemovalOptions,
         val trackedChanges: List<String>,
         val untrackedFiles: List<String>,
-        val ignoredFiles: List<String>,
         val remoteBranchAbsent: Boolean,
         val remoteBranchDetails: String,
         val unretainedCommitIds: List<String>,
@@ -216,11 +214,11 @@ internal object GitWorktrees {
             state.add(Files.readAttributes(path, BasicFileAttributes::class.java).fileKey()?.toString().orEmpty())
             path.toString()
         }
-        val inventory = observe("Worktree inventory", RemovalBlockReason.INVENTORY_UNKNOWN, captureState = false) {
-            git(repository, "worktree", "list", "--porcelain", "-z")
-        }
-        val entries = if (inventory == null) emptyList() else try {
-            parse(inventory)
+        val entries = try {
+            val output = observe("Worktree inventory", RemovalBlockReason.INVENTORY_UNKNOWN, captureState = false) {
+                git(repository, "worktree", "list", "--porcelain", "-z")
+            }
+            if (output == null) emptyList() else parse(output)
         } catch (error: IOException) {
             block(RemovalBlockReason.INVENTORY_UNKNOWN, "Worktree inventory is unknown: ${error.message}")
             emptyList()
@@ -232,11 +230,9 @@ internal object GitWorktrees {
                 it.bare.toString(), it.locked?.let { reason -> "locked:$reason" }.orEmpty(),
                 it.prunable?.let { reason -> "prunable:$reason" }.orEmpty()))
         }
-        if (entry == null) block(RemovalBlockReason.FOREIGN_WORKTREE, "Target is not a registered worktree of this repository")
-        if (entry?.main == true) block(RemovalBlockReason.MAIN_WORKTREE, "The main worktree cannot be removed")
-        if (entry?.bare == true) block(RemovalBlockReason.BARE_REPOSITORY, "Bare repositories cannot be removed")
-        if (entry?.locked != null) block(RemovalBlockReason.LOCKED, "Worktree is locked: ${entry.locked}")
-        if (entry?.prunable != null) block(RemovalBlockReason.PRUNABLE, "Worktree is prunable: ${entry.prunable}")
+        WorktreeRemovalPolicy.blockers(entry, open = false).forEach { (code, reason) ->
+            block(RemovalBlockReason.valueOf(code), reason)
+        }
         if (options.deleteLocalBranch) {
             if (entry?.branch == null) block(RemovalBlockReason.BRANCH_REQUIRED, "A detached worktree has no local branch to delete")
             val otherCheckouts = entries.filter { it.branch != null && it.branch == entry?.branch && it.directory != target.toString() }
@@ -320,7 +316,6 @@ internal object GitWorktrees {
         state.add(remoteBranchDetails)
         val tracked = mutableListOf<String>()
         val untracked = mutableListOf<String>()
-        val ignored = mutableListOf<String>()
         val changedPaths = mutableSetOf<String>()
         var unretained = emptyList<String>()
         var unpushed: Int? = null
@@ -335,7 +330,7 @@ internal object GitWorktrees {
                 block(RemovalBlockReason.REPOSITORY_IDENTITY_MISMATCH, "Target repository identity does not match the requested repository")
             }
             val status = observe("Worktree status", RemovalBlockReason.STATUS_UNKNOWN) {
-                git(target, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching")
+                git(target, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=no")
             }
             if (status != null) {
                 val records = status.split('\u0000')
@@ -350,7 +345,6 @@ internal object GitWorktrees {
                     val path = record.substring(3)
                     when (code) {
                         "??" -> untracked.add(path)
-                        "!!" -> ignored.add(path)
                         else -> tracked.add(record)
                     }
                     changedPaths.add(path)
@@ -371,8 +365,6 @@ internal object GitWorktrees {
                     // Index object IDs bind staged bytes as well as the on-disk bytes below.
                     state.add(git(target, "ls-files", "--stage", "-z"))
                     val contents = sortedSetOf<Path>()
-                    val ignoredRoots = ignored.toList()
-                    ignored.clear()
                     for (name in changedPaths) {
                         val path = target.resolve(name).normalize()
                         if (!path.startsWith(target) || path == target) throw IOException("Git returned an unsafe file path")
@@ -381,23 +373,8 @@ internal object GitWorktrees {
                             if (Files.isSymbolicLink(parent)) throw IOException("Changed path traverses a symlink")
                             parent = parent.parent
                         }
-                        val paths = if (Files.isDirectory(path, NOFOLLOW_LINKS)) {
-                            Files.walk(path).use { paths ->
-                                try {
-                                    paths.toList()
-                                } catch (error: java.io.UncheckedIOException) {
-                                    throw IOException("Cannot inspect directory: ${target.relativize(path)}", error)
-                                }
-                            }
-                        } else listOf(path)
-                        contents.addAll(paths)
-                        if (name in ignoredRoots) {
-                            ignored.addAll(paths.map {
-                                target.relativize(it).toString() + if (Files.isDirectory(it, NOFOLLOW_LINKS)) "/" else ""
-                            })
-                        }
+                        contents.add(path)
                     }
-                    ignored.sort()
                     val digest = MessageDigest.getInstance("SHA-256")
                     fun record(value: String) {
                         val bytes = value.toByteArray(Charsets.UTF_8)
@@ -446,7 +423,6 @@ internal object GitWorktrees {
             if (!options.deleteLocalChanges) {
                 if (tracked.isNotEmpty()) block(RemovalBlockReason.TRACKED_CHANGES, "Worktree has tracked changes")
                 if (untracked.isNotEmpty()) block(RemovalBlockReason.UNTRACKED_FILES, "Worktree has untracked files")
-                if (ignored.isNotEmpty()) block(RemovalBlockReason.IGNORED_FILES, "Worktree has ignored files")
             }
             val history = observe("Commit history", RemovalBlockReason.HISTORY_UNKNOWN) {
                 val head = git(target, "rev-parse", "--verify", "HEAD^{commit}").trim()
@@ -504,14 +480,18 @@ internal object GitWorktrees {
         }
         RemovalPlan(
             repositoryDirectory = repository.toString(), directory = target.toString(), head = entry?.head, branch = entry?.branch,
-            options = options, trackedChanges = tracked, untrackedFiles = untracked, ignoredFiles = ignored,
+            options = options, trackedChanges = tracked, untrackedFiles = untracked,
             remoteBranchAbsent = remoteBranchAbsent, remoteBranchDetails = remoteBranchDetails, unretainedCommitIds = unretained,
             unpushedCommits = unpushed, historyKnown = historyKnown, unsafeCommits = unsafe,
             blockedReasons = blocked, blockedCodes = blockedCodes, confirmation = digest.digest().joinToString("") { "%02x".format(it) },
         )
     }
 
-    suspend fun remove(plan: RemovalPlan, confirmation: String): String = withContext(Dispatchers.IO) {
+    suspend fun remove(
+        plan: RemovalPlan,
+        confirmation: String,
+        beforeRemoval: (suspend () -> Unit)? = null,
+    ): String = withContext(Dispatchers.IO) {
         require(confirmation.isNotEmpty() && confirmation == plan.confirmation) { "Confirmation does not match the approved removal preview" }
         require(plan.blockedCodes.isEmpty()) { "Removal is blocked: ${plan.blockedReasons.joinToString("; ")}" }
         val current = previewRemove(plan.repositoryDirectory, plan.directory, plan.options)
@@ -524,6 +504,7 @@ internal object GitWorktrees {
         val arguments = mutableListOf("worktree", "remove")
         if (current.options.deleteLocalChanges) arguments.add("--force")
         arguments.addAll(listOf("--", current.directory))
+        beforeRemoval?.invoke()
         git(repository, *arguments.toTypedArray())
         if (current.options.deleteLocalBranch) {
             val branch = requireNotNull(current.branch)
