@@ -1,5 +1,6 @@
 package local.worktree
 
+import com.intellij.icons.AllIcons
 import com.intellij.openapi.components.service
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.project.Project
@@ -15,7 +16,12 @@ import org.jetbrains.plugins.github.api.GithubServerPath
 import org.jetbrains.plugins.github.api.data.GithubIssueState
 import org.jetbrains.plugins.github.api.data.request.GithubRequestPagination
 import org.jetbrains.plugins.github.authentication.GithubAuthenticationManager
+import org.jetbrains.plugins.github.authentication.accounts.GithubAccount
 import org.jetbrains.plugins.github.authentication.accounts.GithubProjectDefaultAccountHolder
+import org.jetbrains.plugins.github.exceptions.GithubAuthenticationException
+import org.jetbrains.plugins.github.exceptions.GithubJsonException
+import org.jetbrains.plugins.github.exceptions.GithubRateLimitExceededException
+import org.jetbrains.plugins.github.exceptions.GithubStatusCodeException
 import org.jetbrains.plugins.github.util.GHHostedRepositoriesManager
 import org.jetbrains.plugins.github.util.GithubUrlUtil
 import java.io.IOException
@@ -33,31 +39,35 @@ internal class GithubWorktreeStatusProvider(private val project: Project) : Work
     }
 
     override suspend fun read(repository: GitRepository, remoteName: String?, branch: String): WorktreeReviewStatus {
+        var context = "branch $branch"
         try {
             val remotes = repository.remotes
             val remote = if (remoteName != null) remotes.singleOrNull { it.name == remoteName }
             else remotes.singleOrNull { it.name == "origin" } ?: remotes.singleOrNull()
-            if (remote == null) return WorktreeReviewStatus("Unavailable", "Choose an upstream remote (or an unambiguous origin) and Refresh to locate the review.")
+            if (remote == null) return WorktreeReviewStatus("Unavailable", "Choose an upstream remote (or an unambiguous origin) and Refresh to locate the review.", icon = AllIcons.General.Warning)
             val accounts = GithubAuthenticationManager.getInstance().getAccounts()
             val mapping = project.service<GHHostedRepositoriesManager>().knownRepositoriesState.value.singleOrNull {
                 it.gitRepository == repository && it.gitRemote == remote
             }
             val coordinates = mapping?.repository ?: run {
                 val url = remote.urls.singleOrNull()
-                    ?: return WorktreeReviewStatus("Unavailable", "Remote ${remote.name} has multiple URLs; select an unambiguous GitHub remote.")
+                    ?: return WorktreeReviewStatus("Unavailable", "Remote ${remote.name} has multiple URLs; select an unambiguous GitHub remote.", icon = AllIcons.General.Warning)
                 val host = GithubUrlUtil.getHostFromUrl(url)
                 val server = accounts.map { it.server }.distinct().singleOrNull { it.host.equals(host, true) }
                     ?: GithubServerPath.DEFAULT_SERVER.takeIf { it.host.equals(host, true) }
-                    ?: return WorktreeReviewStatus("Unavailable", "Remote ${remote.name} is not a recognized GitHub server. Git-only operations remain available.")
+                    ?: return WorktreeReviewStatus("Unavailable", "Remote ${remote.name} is not a recognized GitHub server. Git-only operations remain available.", icon = AllIcons.General.Warning)
                 val path = GithubUrlUtil.getUserAndRepositoryFromRemoteUrl(url)
                     ?: throw IOException("Cannot resolve the repository URL for ${remote.name}")
                 GHRepositoryCoordinates(server, path)
             }
             val matching = accounts.filter { it.server == coordinates.serverPath }
-            val account = project.service<GithubProjectDefaultAccountHolder>().account?.takeIf { it in matching }
-                ?: matching.singleOrNull()
-                ?: throw IOException(if (matching.isEmpty()) "Log in to ${coordinates.serverPath.host} in Settings > Version Control > GitHub, then Refresh"
-                    else "Select the project default GitHub account in Settings > Version Control > GitHub, then Refresh; multiple accounts match ${coordinates.serverPath.host}")
+            val account = githubReviewAccount(matching, project.service<GithubProjectDefaultAccountHolder>().account)
+                ?: return githubStatusFailure(
+                    if (matching.isEmpty()) "Login required" else "Choose account",
+                    if (matching.isEmpty()) "Log in to ${coordinates.serverPath.host} in Settings > Version Control > GitHub"
+                    else "Set the project default GitHub account; multiple accounts match ${coordinates.serverPath.host}",
+                )
+            context = "$coordinates, branch $branch, account ${account.name}"
             val key = "${account.id}\u0000$coordinates\u0000${remote.name}\u0000${remote.urls}\u0000$branch"
             cache[key]?.let { return it }
             val loadedGeneration = generation.get()
@@ -79,7 +89,7 @@ internal class GithubWorktreeStatusProvider(private val project: Project) : Work
                 val open = numbers(GithubIssueState.open)
                 val closed = numbers(GithubIssueState.closed)
                 val candidates = (open + closed).distinct().sortedDescending()
-                if (candidates.isEmpty()) WorktreeReviewStatus("No PR", "No pull request for $headFilter in $coordinates. Click Refresh to query GitHub again.")
+                if (candidates.isEmpty()) WorktreeReviewStatus("No PR", "No pull request for $headFilter in $coordinates. Click Refresh to query GitHub again.", icon = AllIcons.General.Remove)
                 else {
                     val path = coordinates.repositoryPath
                     val reviews = candidates.map { number ->
@@ -123,18 +133,48 @@ internal class GithubWorktreeStatusProvider(private val project: Project) : Work
             if (generation.get() == loadedGeneration) cache[key] = result
             return result
         } catch (timeout: TimeoutCancellationException) {
-            return failure("GitHub request timed out")
+            return githubStatusFailure("Timed out", "GitHub request timed out for $context")
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (cancelled: ProcessCanceledException) {
             throw cancelled
         } catch (error: Exception) {
-            return failure(error.message ?: error.javaClass.simpleName)
+            return githubStatusFailure(error, context)
         }
     }
+}
 
-    private fun failure(reason: String): WorktreeReviewStatus {
-        val message = "GitHub status unavailable: $reason. Check network and Settings > Version Control > GitHub login, then click Refresh."
-        return WorktreeReviewStatus("Unknown", message, error = message)
+internal fun githubReviewAccount(
+    matching: List<GithubAccount>, projectDefault: GithubAccount?,
+): GithubAccount? = projectDefault?.takeIf { it in matching }
+    ?: matching.singleOrNull()
+
+internal fun githubStatusFailure(label: String, reason: String): WorktreeReviewStatus {
+    val message = "GitHub status unavailable: ${reason.trimEnd('.')}. Click Refresh to retry."
+    return WorktreeReviewStatus(label, message, error = message, icon = AllIcons.General.Warning)
+}
+
+internal fun githubStatusFailure(error: Exception, context: String): WorktreeReviewStatus {
+    val label = when (error) {
+        is GithubAuthenticationException -> "Login required"
+        is GithubRateLimitExceededException -> "Rate limited"
+        is GithubStatusCodeException -> when (error.statusCode) {
+            401 -> "Login required"
+            403 -> "Access denied"
+            404 -> "Repo unavailable"
+            429 -> "Rate limited"
+            else -> "GitHub HTTP ${error.statusCode}"
+        }
+        is GithubJsonException -> "Response error"
+        is IOException -> "Request failed"
+        else -> "Lookup failed"
     }
+    // SDK exception text may include request URLs or credentials; expose only the failure category and type.
+    val reason = if (error is GithubStatusCodeException) "GitHub returned HTTP ${error.statusCode}" else error.javaClass.simpleName
+    val action = when (label) {
+        "Login required" -> " Check Settings > Version Control > GitHub login."
+        "Access denied", "Repo unavailable" -> " Check the repository URL and selected account's repository/organization access."
+        else -> ""
+    }
+    return githubStatusFailure(label, "$context: $reason.$action")
 }

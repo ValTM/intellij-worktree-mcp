@@ -1,5 +1,7 @@
 package local.worktree
 
+import com.intellij.icons.AllIcons
+import com.intellij.ui.RowIcon
 import com.intellij.openapi.util.io.FileUtil
 import com.intellij.testFramework.HeavyPlatformTestCase
 import kotlinx.coroutines.Dispatchers
@@ -31,12 +33,14 @@ class WorktreeDisplayStatusTest : HeavyPlatformTestCase() {
             project, repository.toString(), GitWorktrees.discover(repository.toString()).single(),
         )
         assertEquals("Unpublished", status().syncLabel)
+        assertSame(AllIcons.Actions.Upload, status().syncIcon)
         git(repository, "remote", "add", "origin", temporary.resolve("unused-remote").toString())
         val initial = git(repository, "rev-parse", "HEAD").trim()
         git(repository, "update-ref", "refs/remotes/origin/main", initial)
         assertEquals("No upstream", status().syncLabel)
         git(repository, "branch", "--set-upstream-to=origin/main", "main")
         assertEquals("In sync", status().syncLabel)
+        assertSame(AllIcons.General.GreenCheckmark, status().syncIcon)
         commit(repository, "local")
         assertEquals("Ahead ↑1", status().syncLabel)
         val local = git(repository, "rev-parse", "HEAD").trim()
@@ -63,17 +67,22 @@ class WorktreeDisplayStatusTest : HeavyPlatformTestCase() {
         var status = WorktreeStatusReader.read(project, repository.toString(), entry)
         assertTrue(status.syncLabel.contains("Dirty (1)"))
         assertTrue(status.syncLabel.contains("Untracked (1)"))
+        assertTrue(status.hasLocalChanges)
+        assertTrue(status.localStatusKnown)
         assertFalse(status.mergedHeadCovered)
         commit(repository, "later commit")
         status = WorktreeStatusReader.read(project, repository.toString(), entry)
         assertEquals("Unknown", status.syncLabel)
         assertNotNull(status.error)
+        assertFalse(status.localStatusKnown)
         assertFalse(status.mergedHeadCovered)
         git(repository, "checkout", "--detach")
         entry = GitWorktrees.discover(repository.toString()).single()
         status = WorktreeStatusReader.read(project, repository.toString(), entry)
         assertTrue(status.syncLabel.startsWith("Detached"))
         assertEquals("—", status.reviewLabel)
+        assertSame(AllIcons.Vcs.CommitNode, status.syncIcon)
+        assertSame(AllIcons.General.Remove, status.reviewIcon)
         val linked = temporary.resolve("linked")
         git(repository, "worktree", "add", "-b", "linked", linked.toString())
         git(repository, "worktree", "lock", "--reason", "Keep this checkout", linked.toString())
@@ -85,7 +94,23 @@ class WorktreeDisplayStatusTest : HeavyPlatformTestCase() {
         withContext(Dispatchers.IO) { FileUtil.delete(linked.toFile()) }
         status = WorktreeStatusReader.read(project, repository.toString(), entry)
         assertEquals("Missing", status.syncLabel)
+        assertFalse(status.localStatusKnown)
         assertFalse(status.mergedHeadCovered)
+    }
+
+    fun testSyncIconsComeFromStructuredGitState() {
+        fun sync(ahead: Int?, behind: Int?) = WorktreeStatusReader.syncSummary(false, "origin/main", true, true, ahead, behind)
+        assertSame(AllIcons.General.ArrowUp, sync(1, 0).third)
+        assertSame(AllIcons.General.ArrowDown, sync(0, 1).third)
+        val diverged = sync(1, 1).third as RowIcon
+        assertSame(AllIcons.General.ArrowUp, diverged.getIcon(0))
+        assertSame(AllIcons.General.ArrowDown, diverged.getIcon(1))
+        assertSame(AllIcons.General.GreenCheckmark, sync(0, 0).third)
+        assertSame(AllIcons.General.Warning, sync(null, null).third)
+        assertSame(AllIcons.Vcs.CommitNode, WorktreeStatusReader.syncSummary(true, null, false, false, null, null).third)
+        assertSame(AllIcons.Actions.Upload, WorktreeStatusReader.syncSummary(false, null, false, false, null, null).third)
+        assertSame(AllIcons.Vcs.Branch, WorktreeStatusReader.syncSummary(false, null, false, true, null, null).third)
+        assertSame(AllIcons.General.Warning, WorktreeStatusReader.syncSummary(false, "origin/main", false, true, null, null).third)
     }
 
     fun testReviewStatesRemainVisibleWithoutCleanupProof() {
@@ -95,14 +120,95 @@ class WorktreeDisplayStatusTest : HeavyPlatformTestCase() {
         assertEquals("Draft #42", review("open", draft = true).label)
         assertEquals("Open #42", review("open").label)
         assertEquals("Closed #42", review("closed").label)
+        assertSame(AllIcons.Actions.Edit, review("open", draft = true).icon)
+        assertSame(AllIcons.Vcs.Branch, review("open").icon)
+        assertSame(AllIcons.Actions.Close, review("closed").icon)
+        assertSame(AllIcons.Vcs.Merge, review("closed", merged = true).icon)
         assertNull(review("closed").mergeProof)
         assertNull(review("open").mergeProof)
         assertEquals(proof, review("closed", merged = true).mergeProof)
         val incomplete = review("closed", merged = true, target = null)
         assertEquals("Merged #42", incomplete.label)
+        assertSame(AllIcons.Vcs.Merge, incomplete.icon)
         assertNull(incomplete.mergeProof)
         assertTrue(incomplete.details.contains("cleanup is unavailable"))
         assertTrue(incomplete.details.contains("Refresh"))
+    }
+
+    fun testPendingAndFailedReviewsRetainExactIdentityCleanupEvidence() {
+        val identity = WorktreeIdentity("/worktree", "branch", "head")
+        val local = WorktreeDisplayStatus(
+            "In sync · Dirty (1)", "Local Git snapshot", "Loading…", "Loading pull request status.",
+            syncIcon = AllIcons.General.GreenCheckmark, reviewIcon = AllIcons.Actions.Refresh, reviewLoading = true,
+            identity = identity, hasLocalChanges = true, localStatusKnown = true,
+        )
+        val previous = WorktreeDisplayStatus("In sync", "Old local snapshot", "Merged #42", "Review snapshot",
+            mergedHeadCovered = true, reviewIcon = AllIcons.Vcs.Merge, cleanupKind = "MERGED", identity = identity)
+        val pending = WorktreeStatusReader.retainReview(local, previous)
+        assertEquals(local.syncLabel, pending.syncLabel)
+        assertTrue(pending.reviewLoading)
+        assertTrue(pending.reviewCached)
+        assertEquals("Merged #42", pending.reviewLabel)
+        assertFalse(pending.mergedHeadCovered)
+        assertEquals("MERGED", pending.cleanupKind)
+        val failed = WorktreeStatusReader.retainReview(local.copy(
+            reviewLoading = false, reviewLabel = "Unavailable", reviewError = "Review offline",
+        ), pending)
+        assertEquals(local.syncLabel, failed.syncLabel)
+        assertFalse(failed.reviewLoading)
+        assertTrue(failed.reviewCached)
+        assertEquals("Review offline", failed.reviewError)
+        assertFalse(failed.mergedHeadCovered)
+        assertEquals("MERGED", failed.cleanupKind)
+        assertTrue(WorktreeRemovalCandidate(GitWorktree(identity.directory, identity.head, identity.branch, false, false, null, null),
+            failed, open = false).eligibility(cleanup = true).selectable)
+        assertFalse(WorktreeStatusReader.retainReview(local, local).reviewCached)
+        for (changed in listOf(identity.copy(head = "new-head"), identity.copy(branch = "other"), identity.copy(directory = "/other"))) {
+            val invalidated = WorktreeStatusReader.retainReview(local.copy(identity = changed), previous)
+            assertFalse(invalidated.reviewCached)
+            assertEquals("BLOCKED", invalidated.cleanupKind)
+        }
+        assertFalse(WorktreeStatusReader.retainReview(local.copy(identity = null), previous).reviewCached)
+    }
+
+    fun testReviewRevalidatesHeadAfterPublishedLocalSnapshot() = runBlocking {
+        val repository = initialize()
+        val entry = GitWorktrees.discover(repository.toString()).single()
+        val local = WorktreeStatusReader.readLocal(entry)
+        assertEquals("Unpublished", local.status.syncLabel)
+        assertTrue(local.status.reviewLoading)
+        assertFalse(local.status.hasLocalChanges)
+        commit(repository, "changed while review was pending")
+        val status = WorktreeStatusReader.readReview(project, repository.toString(), local)
+        assertEquals(local.status.syncLabel, status.syncLabel)
+        assertTrue(status.error.orEmpty().contains("HEAD changed"))
+        assertFalse(status.mergedHeadCovered)
+        assertEquals("BLOCKED", status.cleanupKind)
+        assertFalse(status.reviewLoading)
+    }
+
+    fun testLocalSnapshotCarriesMergeEvidenceWithoutAutoSelectingDirtyWorktrees() = runBlocking {
+        val repository = initialize()
+        val head = git(repository, "rev-parse", "HEAD").trim()
+        git(repository, "remote", "add", "origin", "git@github.com:owner/repo.git")
+        git(repository, "update-ref", "refs/remotes/origin/main", head)
+        git(repository, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        val linked = temporary.resolve("linked")
+        git(repository, "worktree", "add", "-b", "feature", linked.toString())
+        val entry = GitWorktrees.discover(repository.toString()).single { it.directory == linked.toString() }
+        val clean = WorktreeStatusReader.read(project, repository.toString(), entry)
+        assertTrue(clean.localStatusKnown)
+        assertEquals("MERGED", clean.cleanupKind)
+        assertTrue(clean.mergedHeadCovered)
+        withContext(Dispatchers.IO) { Files.writeString(linked.resolve("untracked.txt"), "keep") }
+        val dirty = WorktreeStatusReader.read(project, repository.toString(), entry)
+        assertTrue(dirty.localStatusKnown)
+        assertTrue(dirty.hasLocalChanges)
+        assertEquals("MERGED", dirty.cleanupKind)
+        assertFalse(dirty.mergedHeadCovered)
+        val candidate = WorktreeRemovalCandidate.fromSnapshot(entry, dirty, open = false)
+        assertTrue(candidate.eligibility(cleanup = true).selectable)
+        assertFalse(candidate.eligibility(cleanup = true).safe)
     }
 
     fun testSquashCoverageUsesHistoricalSameRepositoryProofAndOlderSourceButNeverLaterCommits() = runBlocking {
