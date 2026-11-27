@@ -21,9 +21,9 @@ import com.intellij.openapi.extensions.ExtensionPointName
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.DialogWrapper
-import com.intellij.openapi.ui.ValidationInfo
 import com.intellij.openapi.util.SystemInfoRt
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.ui.AnimatedIcon
@@ -33,7 +33,6 @@ import com.intellij.ui.components.JBCheckBox
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBPanel
 import com.intellij.ui.components.JBScrollPane
-import com.intellij.ui.components.JBTextField
 import com.intellij.ui.table.JBTable
 import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.UIUtil
@@ -57,8 +56,6 @@ import java.awt.BorderLayout
 import java.awt.Component
 import java.awt.Dimension
 import java.awt.Graphics
-import java.awt.GridBagConstraints
-import java.awt.GridBagLayout
 import java.awt.event.HierarchyEvent
 import java.awt.event.ActionEvent
 import java.awt.event.KeyEvent
@@ -69,9 +66,12 @@ import javax.swing.AbstractAction
 import javax.swing.BoxLayout
 import javax.swing.JButton
 import javax.swing.JComponent
+import javax.swing.JEditorPane
 import javax.swing.JPanel
 import javax.swing.JProgressBar
 import javax.swing.JTable
+import javax.swing.JSplitPane
+import javax.swing.JToggleButton
 import javax.swing.JTextArea
 import javax.swing.KeyStroke
 import javax.swing.ListSelectionModel
@@ -512,35 +512,55 @@ internal class WorktreeLifecyclePanel(private val project: Project) : JBPanel<Wo
 
     private fun create() {
         val repository = repository() ?: return
-        val dialog = CreateDialog(project, repository)
-        if (!dialog.showAndGet()) return
-        val directory = dialog.directory.text.trim()
-        val branch = dialog.branch.text.trim()
-        val start = dialog.start.text.trim()
-        val newBranch = dialog.newBranch.isSelected
-        val copySettings = dialog.copySettings.isSelected
         task("Creating worktree…") {
-            val preview = operations.worktree_create_preview(repository, directory, branch, start, newBranch)
-            require(preview.get("status")?.asString == "preview") { outcome(preview) }
-            if (!confirm("Create Worktree", creationText(preview, copySettings), "Create Worktree")) {
-                withContext(Dispatchers.EDT) { message.text = "Creation cancelled; nothing changed" }
+            var input = WorktreeCreateInput()
+            while (true) {
+                val edited = withContext(Dispatchers.EDT) {
+                    if (project.isDisposed) null else CreateDialog(project, repository, input).let {
+                        if (it.showAndGet()) it.input else null
+                    }
+                }
+                if (edited == null) {
+                    withContext(Dispatchers.EDT) { message.text = "Creation cancelled; nothing changed" }
+                    return@task
+                }
+                input = edited
+                val directory = input.directory.trim()
+                val branch = input.branch.trim()
+                val start = input.start.trim()
+                val preview = operations.worktree_create_preview(repository, directory, branch, start, input.newBranch)
+                require(preview.get("status")?.asString == "preview") { outcome(preview) }
+                val decision = withContext(Dispatchers.EDT) {
+                    if (project.isDisposed) DialogWrapper.CANCEL_EXIT_CODE else {
+                        val review = CreationReviewDialog(project, preview, input.copySettings)
+                        review.show()
+                        review.exitCode
+                    }
+                }
+                if (decision == CreationReviewDialog.BACK_EXIT_CODE) continue
+                if (decision != DialogWrapper.OK_EXIT_CODE) {
+                    withContext(Dispatchers.EDT) { message.text = "Creation cancelled; nothing changed" }
+                    return@task
+                }
+                val result = operations.worktree_create(
+                    repository, directory, branch, start, preview.get("confirmation").asString, input.newBranch,
+                )
+                val transfer = if (input.copySettings && result.get("status")?.asString == "created") {
+                    try {
+                        operations.copySettings(repository, result.get("directory").asString).summary()
+                    } catch (cancelled: CancellationException) { throw cancelled }
+                    catch (cancelled: ProcessCanceledException) { throw cancelled }
+                    catch (error: Exception) {
+                        "IDE settings: 0 copied, 0 skipped; transfer failed: ${error.message ?: error.javaClass.simpleName}. Created worktree retained"
+                    }
+                } else null
+                withContext(Dispatchers.EDT) {
+                    message.text = listOfNotNull(outcome(result), transfer).joinToString(" · ")
+                    message.toolTipText = message.text
+                }
+                loadInventory(repository)
                 return@task
             }
-            val result = operations.worktree_create(repository, directory, branch, start, preview.get("confirmation").asString, newBranch)
-            val transfer = if (copySettings && result.get("status")?.asString == "created") {
-                try {
-                    operations.copySettings(repository, result.get("directory").asString).summary()
-                } catch (cancelled: CancellationException) { throw cancelled }
-                catch (cancelled: ProcessCanceledException) { throw cancelled }
-                catch (error: Exception) {
-                    "IDE settings: 0 copied, 0 skipped; transfer failed: ${error.message ?: error.javaClass.simpleName}. Created worktree retained"
-                }
-            } else null
-            withContext(Dispatchers.EDT) {
-                message.text = listOfNotNull(outcome(result), transfer).joinToString(" · ")
-                message.toolTipText = message.text
-            }
-            loadInventory(repository)
         }
     }
 
@@ -553,62 +573,19 @@ internal class WorktreeLifecyclePanel(private val project: Project) : JBPanel<Wo
     private fun remove() {
         val repository = repository() ?: return
         task("Preparing worktree removal preview…") {
-            val selection = withContext(Dispatchers.EDT) {
-                if (project.isDisposed) null else {
-                    // ponytail: choices reuse the table; only selected worktrees receive a fresh destructive preview.
-                    val shared = inventory ?: return@withContext null
-                    val dialog = WorktreeRemovalDialog(project, shared.snapshots) { windows.keys }
-                    if (dialog.showAndGet()) dialog.selection else null
-                }
-            }
+            val selection = selectWorktreesForRemoval(project, repository)
             if (selection == null) {
                 withContext(Dispatchers.EDT) { message.text = "Deletion cancelled; nothing changed" }
                 return@task
             }
-            val removal = service<WorktreeRemovalService>()
-            if (selection.closeProjects.isNotEmpty()) {
-                val approved = confirm(
-                    "Close Selected Projects Before Removal",
-                    "Switch to this repository's main worktree without checking out another branch, then normally close only these projects:\n\n" +
-                        selection.closeProjects.joinToString("\n") +
-                        "\n\nSave prompts and close vetoes are respected. Cancel or any close failure stops deletion. " +
-                        "A fresh removal preview and final deletion confirmation follow in the main project. " +
-                        "Close projects in other IDE instances yourself.",
-                    "Switch to Main Worktree and Close Projects",
-                )
-                if (!approved) {
-                    withContext(Dispatchers.EDT) { message.text = "Deletion cancelled; nothing changed" }
-                    return@task
-                }
-                // Launch only after both modal dialogs have returned; closing this panel cannot cancel it.
-                removal.closeAndRemove(project, repository, selection).join()
-            } else {
-                val result = removal.previewAndRemove(project, repository, selection)
-                withContext(Dispatchers.EDT) { message.text = result }
-            }
+            // Application scope survives closure of the project that opened this panel.
+            service<WorktreeRemovalService>().remove(project, repository, selection).join()
         }
-    }
-
-    private suspend fun confirm(title: String, text: String, button: String): Boolean = withContext(Dispatchers.EDT) {
-        !project.isDisposed && PreviewDialog(project, title, text, button).showAndGet()
     }
 
     private fun outcome(value: JsonObject): String = listOfNotNull(value.get("status")?.asString,
         value.get("reason")?.takeUnless { it.isJsonNull }?.asString).joinToString(": ")
 
-    private fun creationText(plan: JsonObject, copySettings: Boolean): String = """
-        Repository: ${plan.get("repositoryDirectory").asString}
-        Destination: ${plan.get("directory").asString}
-        Branch: ${plan.get("branch").asString} (${if (plan.get("newBranch").asBoolean) "new branch" else "existing branch; never reset"})
-        Starting ref: ${plan.get("startRef").asString}
-        Resolved HEAD: ${plan.get("head").asString}
-
-        Create this exact checkout without opening a project, running installers or Git hooks.
-        If the destination, branch or starting commit changes, creation is refused and needs a new preview.
-
-        Copy portable IDE settings after Git creation: ${if (copySettings) "Yes" else "No"}
-        ${if (copySettings) "Only shared run configurations, project inspection profiles and code styles are copied, without changing payloads or environment values. Existing/tracked settings, duplicate run type/name and literal source-checkout paths are skipped. Workspace, project identity, modules, database, UI and cache state are never copied. Transfer failure retains the created worktree." else "No IDE settings will be copied."}
-    """.trimIndent()
     private fun cellDescription(index: Int, column: Int, states: List<Pair<javax.swing.Icon, String>>? = null): String {
         val row = rows[index]
         return when (column) {
@@ -699,16 +676,36 @@ internal class PreviewDialog(project: Project, title: String, text: String, conf
     override fun getPreferredFocusedComponent(): JComponent = details
 }
 
+internal suspend fun selectWorktreesForRemoval(
+    project: Project, repository: String, initialSelection: WorktreeRemovalDialog.Selection? = null,
+): WorktreeRemovalDialog.Selection? {
+    val shared = service<WorktreeInventoryService>().inventory(repository)
+    if (shared.snapshots.value == null) shared.refreshStatus(project, repository)
+    return withContext(Dispatchers.EDT) {
+        if (project.isDisposed) return@withContext null
+        val dialog = WorktreeRemovalDialog(
+            project, shared.snapshots,
+            { ProjectManager.getInstance().openProjects.mapNotNull { it.basePath } },
+            initialSelection, repository,
+        )
+        if (dialog.showAndGet()) dialog.selection else null
+    }
+}
+
 
 internal class WorktreeRemovalDialog(
     project: Project, private var candidates: List<WorktreeRemovalCandidate>, cleanup: Boolean = true,
     private val snapshots: StateFlow<WorktreeInventorySnapshot?>? = null,
     private val openProjects: () -> Collection<String> = { emptyList() },
+    private val initialSelection: Selection? = null,
+    private val repository: String = project.basePath.orEmpty(),
 ) : DialogWrapper(project) {
     constructor(
         project: Project, snapshots: StateFlow<WorktreeInventorySnapshot?>,
         openProjects: () -> Collection<String>,
-    ) : this(project, snapshots.value?.removalCandidates(openProjects()).orEmpty(), true, snapshots, openProjects)
+        initialSelection: Selection? = null, repository: String = project.basePath.orEmpty(),
+    ) : this(project, snapshots.value?.removalCandidates(openProjects()).orEmpty(),
+        initialSelection?.cleanup ?: true, snapshots, openProjects, initialSelection, repository)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.EDT + ModalityState.any().asContextElement())
     internal data class Choice(
@@ -718,21 +715,43 @@ internal class WorktreeRemovalDialog(
         val plans: List<JsonObject>, val deleteLocalBranches: List<String>,
         val deleteLocalChanges: List<String>, val includeClosedUnmerged: List<String>, val cleanup: Boolean,
         val closeProjects: List<String> = emptyList(),
+        val closeProjectsEnabled: Boolean = true,
+        val deleteBranchesEnabled: Boolean = deleteLocalBranches.isNotEmpty(),
+        val discardChangesEnabled: Boolean = deleteLocalChanges.isNotEmpty(),
     )
     private var confirmedSelection: Selection? = null
     private val status = JBLabel()
-    internal val cleanupMode = JBCheckBox("Cleanup only — require merge or closed-review evidence", cleanup).apply {
+    internal val cleanupMode = JBCheckBox("Verified cleanup", initialSelection?.cleanup ?: cleanup).apply {
         isEnabled = candidates.isNotEmpty()
         toolTipText = "Uncheck for individually approved removal without merge classification. Other safety checks still apply."
         addActionListener { projectCandidates() }
     }
-    internal val closeSelectedProjects = JBCheckBox("Close selected projects before removal", true).apply {
+    internal val closeSelectedProjects = JBCheckBox("Close selected open projects before review", initialSelection?.closeProjectsEnabled ?: true).apply {
         toolTipText = "Switches to the main worktree, then normally closes only explicitly selected projects after confirmation."
         addActionListener { projectCandidates() }
     }
-    internal val deleteLocalBranches = JBCheckBox("Delete local branches for selected worktrees", false)
-    internal val discardLocalChanges = JBCheckBox("Discard local changes in selected worktrees (force)", false)
+    internal val deleteLocalBranches = JBCheckBox("Delete local branches", initialSelection?.deleteBranchesEnabled ?: false).apply {
+        addActionListener { updateSelection() }
+    }
+    internal val discardLocalChanges = JBCheckBox("Discard local changes", initialSelection?.discardChangesEnabled ?: false).apply {
+        addActionListener { updateSelection() }
+    }
     internal val choices = candidates.map { makeChoice(plan(it)) }.toMutableList()
+    internal val detailsPanel = JEditorPane("text/html", "").apply {
+        isEditable = false
+        isOpaque = false
+        putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
+        font = UIUtil.getLabelFont()
+        border = JBUI.Borders.empty(8, 16)
+        accessibleContext.accessibleName = "Focused worktree details"
+    }
+    private val optionsPanel = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS) }
+    private val optionsToggle = JToggleButton("Additional deletion options").apply {
+        addActionListener { updateSelection() }
+    }
+    private val optionsSummary = JBLabel()
+    private val modeDescription = JBLabel()
+    private var focusedWorktreeDirectory: String? = null
     private fun eligibility(plan: WorktreeRemovalSelection): String = when {
         "MAIN_WORKTREE" in plan.eligibility.blocked -> "Main checkout — cannot remove"
         plan.open && plan.eligibility.selectable -> "Will close selected project before fresh preview"
@@ -745,7 +764,7 @@ internal class WorktreeRemovalDialog(
         else -> "Can be removed"
     }
     private val tableModel = object : AbstractTableModel() {
-        private val columns = arrayOf("Remove", "Worktree", "Status")
+        private val columns = arrayOf("", "Worktree", "State")
         override fun getRowCount() = choices.size
         override fun getColumnCount() = columns.size
         override fun getColumnName(column: Int) = columns[column]
@@ -753,8 +772,16 @@ internal class WorktreeRemovalDialog(
         override fun getValueAt(row: Int, column: Int): Any = choices[row].let { choice ->
             when (column) {
                 0 -> choice.selected.isSelected
-                1 -> Path.of(choice.plan.entry.directory).fileName.toString()
-                else -> eligibility(choice.plan)
+                1 -> choice.plan.entry.branch ?: Path.of(choice.plan.entry.directory).fileName.toString()
+                else -> when {
+                    choice.plan.entry.main -> "Main"
+                    !choice.plan.eligibility.selectable -> "Blocked"
+                    choice.plan.open -> "Open"
+                    choice.plan.eligibility.cleanupKind == "CLOSED_UNMERGED" -> "Closed PR"
+                    !choice.plan.eligibility.safe -> "Changes"
+                    choice.plan.eligibility.cleanupKind == "MERGED" -> "Merged"
+                    else -> "Available"
+                }
             }
         }
         override fun isCellEditable(row: Int, column: Int): Boolean = column == 0 && choices[row].selected.isEnabled
@@ -769,6 +796,12 @@ internal class WorktreeRemovalDialog(
         override fun prepareRenderer(renderer: javax.swing.table.TableCellRenderer, row: Int, column: Int): Component =
             super.prepareRenderer(renderer, row, column).apply {
                 isEnabled = (column == 1 || column == 2) || tableModel.isCellEditable(row, column)
+                if (column == 1 && this is javax.swing.JLabel) {
+                    val entry = choices[row].plan.entry
+                    val branch = StringUtil.escapeXmlEntities(entry.branch ?: "Detached HEAD")
+                    val directory = StringUtil.escapeXmlEntities(Path.of(entry.directory).fileName.toString())
+                    text = "<html>$branch<br><small>$directory</small></html>"
+                }
             }
         override fun getToolTipText(event: MouseEvent): String? = choices.getOrNull(rowAtPoint(event.point))?.let {
             val reasons = it.plan.eligibility.blocked.values.joinToString("; ")
@@ -776,16 +809,22 @@ internal class WorktreeRemovalDialog(
         }
     }.apply {
         setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
-        rowHeight = JBUI.scale(30)
+        rowHeight = JBUI.scale(46)
         setShowGrid(false)
         setStriped(true)
         accessibleContext.accessibleName = "Worktrees to remove"
         emptyText.text = "No candidates available"
-        val widths = listOf(80, 210, 570)
+        val widths = listOf(32, 270, 90)
         widths.forEachIndexed { index, width -> columnModel.getColumn(index).apply {
             preferredWidth = JBUI.scale(width)
-            if (index == 0) minWidth = JBUI.scale(width)
+            if (index == 0) { minWidth = JBUI.scale(width); maxWidth = JBUI.scale(width) }
         } }
+        selectionModel.addListSelectionListener {
+            if (!it.valueIsAdjusting) {
+                focusedWorktreeDirectory = choices.getOrNull(selectedRow)?.plan?.entry?.directory
+                renderDetails()
+            }
+        }
     }
     private fun plan(candidate: WorktreeRemovalCandidate): WorktreeRemovalSelection =
         candidate.plan(cleanupMode.isSelected, closeSelectedProjects.isSelected)
@@ -815,19 +854,20 @@ internal class WorktreeRemovalDialog(
             selected.filter { it.plan.eligibility.cleanupKind == "CLOSED_UNMERGED" }.map { it.plan.entry.directory },
             cleanupMode.isSelected,
             selected.filter { closeSelectedProjects.isSelected && it.plan.open }.map { it.plan.entry.directory },
+            closeSelectedProjects.isSelected, deleteLocalBranches.isSelected, discardLocalChanges.isSelected,
         )
     }
-    internal val selectSafe = JButton("Select safe worktrees").apply { addActionListener {
+    internal val selectSafe = JButton("Select Safe").apply { addActionListener {
         choices.forEach {
             it.selected.isSelected = it.selected.isEnabled && it.plan.eligibility.safe && !it.plan.open
         }
         updateSelection()
     } }
-    internal val selectAll = JButton("Select all worktrees").apply { addActionListener {
+    internal val selectAll = JButton("Select All").apply { addActionListener {
         choices.forEach { it.selected.isSelected = it.selected.isEnabled }
         updateSelection()
     } }
-    internal val clearSelection = JButton("Clear selection").apply { addActionListener {
+    internal val clearSelection = JButton("Clear").apply { addActionListener {
         choices.forEach { it.selected.isSelected = false }
         updateSelection()
     } }
@@ -835,6 +875,18 @@ internal class WorktreeRemovalDialog(
         title = "Remove Worktrees"
         init()
         rootPane?.defaultButton = null
+        initialSelection?.let { previous ->
+            val selected = previous.plans.associateBy { it["directory"].asString }
+            choices.forEach { choice ->
+                val old = selected[choice.plan.entry.directory]
+                choice.selected.isSelected = old != null && choice.selected.isEnabled &&
+                    old["head"]?.takeUnless { it.isJsonNull }?.asString == choice.plan.entry.head &&
+                    old["branch"]?.takeUnless { it.isJsonNull }?.asString == choice.plan.entry.branch &&
+                    (old["safe"]?.asBoolean != true || choice.plan.eligibility.safe) &&
+                    (old["cleanupKind"]?.asString == choice.plan.eligibility.cleanupKind) &&
+                    (old["open"]?.asBoolean == true || !choice.plan.open)
+            }
+        }
         renderCandidates()
         snapshots?.let { shared ->
             scope.launch {
@@ -873,10 +925,13 @@ internal class WorktreeRemovalDialog(
         cleanupMode.isEnabled = candidates.isNotEmpty()
         renderCandidates()
     }
-    private fun renderCandidates() {
-        candidatesTable.cellEditor?.stopCellEditing()
-        status.text = "${choices.count { it.selected.isEnabled }} of ${choices.size} eligible · Shared repository snapshot; selected worktrees get a fresh preview."
+    private fun renderCandidates(focusedDirectory: String? = focusedWorktreeDirectory) {
+        modeDescription.text = if (cleanupMode.isSelected) "Merge or closed-review evidence required"
+            else "Manual removal — merge evidence is not required"
         tableModel.fireTableDataChanged()
+        val row = choices.indexOfFirst { it.plan.entry.directory == focusedDirectory }.takeIf { it >= 0 }
+            ?: 0.takeIf { choices.isNotEmpty() }
+        if (row != null) candidatesTable.setRowSelectionInterval(row, row)
         updateSelection()
     }
     private fun updateSelection() {
@@ -887,25 +942,99 @@ internal class WorktreeRemovalDialog(
         selectAll.isEnabled = choices.any { it.selected.isEnabled && !it.selected.isSelected }
         clearSelection.isEnabled = choices.any { it.selected.isSelected }
         val count = choices.count { it.selected.isEnabled && it.selected.isSelected }
-        setOKButtonText("Preview deletion ($count)…")
+        status.text = "$count selected · ${choices.count { it.selected.isEnabled }} available"
+        val destructive = deleteLocalBranches.isSelected || discardLocalChanges.isSelected
+        optionsToggle.isSelected = optionsToggle.isSelected || destructive
+        optionsToggle.isEnabled = !destructive
+        optionsPanel.isVisible = optionsToggle.isSelected
+        optionsSummary.text = when {
+            deleteLocalBranches.isSelected && discardLocalChanges.isSelected -> "Delete branches and discard changes"
+            deleteLocalBranches.isSelected -> "Delete local branches"
+            discardLocalChanges.isSelected -> "Discard local changes"
+            else -> "All off · local branches kept"
+        }
+        optionsSummary.foreground = if (destructive) UIUtil.getErrorForeground() else UIUtil.getLabelForeground()
+        closeSelectedProjects.isVisible = choices.any { it.plan.open && !it.plan.entry.main }
+        setOKButtonText(if (currentSelection().closeProjects.isNotEmpty()) "Review Project Closure…" else "Review Removal…")
+        renderDetails()
         isOKActionEnabled = count > 0
     }
-    override fun createCenterPanel(): JComponent = JPanel(BorderLayout(0, JBUI.scale(8))).apply {
-        add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
-            add(JPanel().apply {
-                layout = BoxLayout(this, BoxLayout.Y_AXIS)
+    private fun renderDetails() {
+        val content = StringBuilder("<html><body>")
+        val choice = choices.getOrNull(candidatesTable.selectedRow)
+        fun detail(text: String, heading: Boolean = false) {
+            content.append("<p style='margin-top:").append(if (heading) 12 else 5).append("px;margin-bottom:0'>")
+            if (heading) content.append("<b>")
+            content.append(StringUtil.escapeXmlEntities(text).replace("\n", "<br>"))
+            if (heading) content.append("</b>")
+            content.append("</p>")
+        }
+        if (choice == null) {
+            detail("Select a worktree to inspect its details")
+        } else {
+            val plan = choice.plan
+            detail(plan.entry.branch ?: "Detached HEAD", true)
+            detail(plan.entry.directory)
+            detail(if (choice.selected.isSelected) "Selected for removal" else "Not selected for removal")
+            detail("Eligibility", true)
+            detail(eligibility(plan))
+            plan.eligibility.blocked.values.forEach { detail(it) }
+            candidates.firstOrNull { it.entry.directory == plan.entry.directory }?.status?.let {
+                detail("Git and review", true)
+                detail(it.syncDetails)
+                detail(it.reviewDetails)
+            }
+            detail("On removal", true)
+            detail(if (deleteLocalBranches.isSelected && plan.entry.branch != null)
+                "Delete local branch: ${plan.entry.branch}" else "Keep local branch")
+            detail(if (discardLocalChanges.isSelected)
+                "Discard local changes. Exact affected files are shown in the fresh review."
+                else "Local changes block deletion; no force removal.")
+            detail("Ignored contents are deleted with the directory. Remote branches are unchanged.")
+            if (plan.open && closeSelectedProjects.isSelected)
+                detail("Project closure requires separate confirmation before the deletion review.")
+        }
+        detailsPanel.text = content.append("</body></html>").toString()
+        detailsPanel.caretPosition = 0
+    }
+
+    override fun createCenterPanel(): JComponent = JPanel(BorderLayout(0, JBUI.scale(12))).apply {
+        add(JPanel(BorderLayout(0, JBUI.scale(8))).apply {
+            add(JBLabel("Repository: $repository"), BorderLayout.NORTH)
+            add(JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 0, 0)).apply {
                 add(cleanupMode)
-                add(closeSelectedProjects)
-                add(deleteLocalBranches)
-                add(discardLocalChanges)
-            }, BorderLayout.NORTH)
+                add(modeDescription.apply { border = JBUI.Borders.emptyLeft(12) })
+            }, BorderLayout.CENTER)
+        }, BorderLayout.NORTH)
+        val list = JPanel(BorderLayout(0, JBUI.scale(6))).apply {
             add(JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 4, 0)).apply {
                 add(selectSafe); add(selectAll); add(clearSelection)
-            }, BorderLayout.CENTER)
-            add(status, BorderLayout.SOUTH)
-        }, BorderLayout.NORTH)
-        add(JBScrollPane(candidatesTable).apply { preferredSize = JBUI.size(860, 240) }, BorderLayout.CENTER)
-        add(JBLabel("Ignored files are removed with the directory. Close projects in other IDE instances yourself."), BorderLayout.SOUTH)
+            }, BorderLayout.NORTH)
+            add(JBScrollPane(candidatesTable), BorderLayout.CENTER)
+            minimumSize = JBUI.size(300, 220)
+        }
+        val details = JBScrollPane(detailsPanel).apply { minimumSize = JBUI.size(280, 220) }
+        add(JSplitPane(JSplitPane.HORIZONTAL_SPLIT, list, details).apply {
+            resizeWeight = 0.48
+            setDividerLocation(0.48)
+            preferredSize = JBUI.size(860, 300)
+            border = JBUI.Borders.empty()
+        }, BorderLayout.CENTER)
+        add(JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            add(closeSelectedProjects)
+            add(JPanel(BorderLayout(12, 0)).apply {
+                add(optionsToggle, BorderLayout.WEST)
+                add(optionsSummary, BorderLayout.CENTER)
+            })
+            optionsPanel.add(deleteLocalBranches)
+            optionsPanel.add(discardLocalChanges)
+            add(optionsPanel)
+            add(JBLabel("Selected directories and ignored contents will be removed.").apply {
+                border = JBUI.Borders.emptyTop(8)
+            })
+            add(status.apply { border = JBUI.Borders.emptyTop(4) })
+        }, BorderLayout.SOUTH)
     }
     override fun getPreferredFocusedComponent(): JComponent = candidatesTable
     override fun doOKAction() {
@@ -921,36 +1050,3 @@ internal class WorktreeRemovalDialog(
     }
 }
 
-private class CreateDialog(project: Project, repository: String) : DialogWrapper(project) {
-    val directory = JBTextField(40)
-    val branch = JBTextField(40)
-    val start = JBTextField("HEAD", 40)
-    val newBranch = JBCheckBox("Create a new local branch", true)
-    val copySettings = JBCheckBox("Copy portable IDE settings (shared run configs, inspections, code styles)", false).apply {
-        toolTipText = "Optional; never copies workspace/project identity or overwrites destination settings. Nonportable and conflicting configurations are skipped."
-    }
-    init {
-        title = "Create Worktree — $repository"
-        directory.emptyText.text = "Absolute destination (must not exist)"
-        init()
-        setOKButtonText("Preview…")
-    }
-    override fun createCenterPanel(): JComponent = JPanel(GridBagLayout()).apply {
-        val constraints = GridBagConstraints().apply { insets = JBUI.insets(4); fill = GridBagConstraints.HORIZONTAL; weightx = 1.0 }
-        listOf("Destination" to directory, "Branch" to branch, "Starting ref" to start).forEachIndexed { index, (name, field) ->
-            field.accessibleContext.accessibleName = name
-            constraints.gridx = 0; constraints.gridy = index; constraints.weightx = 0.0
-            add(JBLabel("$name:").apply { labelFor = field }, constraints)
-            constraints.gridx = 1; constraints.weightx = 1.0; add(field, constraints)
-        }
-        constraints.gridx = 1; constraints.gridy = 3; add(newBranch, constraints)
-        constraints.gridy = 4; add(copySettings, constraints)
-    }
-    override fun doValidate(): ValidationInfo? = when {
-        directory.text.isBlank() -> ValidationInfo("Supply an absolute destination", directory)
-        branch.text.isBlank() -> ValidationInfo("Supply an explicit local branch", branch)
-        start.text.isBlank() -> ValidationInfo("Supply an explicit starting ref", start)
-        else -> null
-    }
-    override fun getPreferredFocusedComponent(): JComponent = directory
-}

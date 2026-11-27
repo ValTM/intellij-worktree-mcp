@@ -43,6 +43,7 @@
     <depends optional="true" config-file="worktree-github.xml">org.jetbrains.plugins.github</depends>
     <depends>com.intellij.platform.vcs</depends>
     <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup id="Worktree Lifecycle" displayType="BALLOON" isLogByDefault="true"/>
         <mcpServer.mcpToolset implementation="local.worktree.WorktreeTools"/>
         <changesViewContent id="worktree.lifecycle"
                             tabName="Worktree Lifecycle"
