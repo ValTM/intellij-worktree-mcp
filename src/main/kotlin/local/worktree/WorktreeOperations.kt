@@ -35,7 +35,6 @@ import com.intellij.openapi.wm.IdeFocusManager
 import com.intellij.openapi.wm.WindowManager
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.platform.PlatformProjectOpenProcessor
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
 import com.intellij.ui.mac.foundation.Foundation
@@ -581,13 +580,9 @@ internal class WorktreeOperations {
         override suspend fun targetAvailable(project: Project): Boolean = onEdt(ModalityState.any()) { target(project)?.available() == true }
         override suspend fun modal(): Boolean = modalPreflight()
 
-        override suspend fun open(directory: String): Project? {
-            val path = Path.of(directory)
-            // Explicit tasks retain trust prompts but skip inferred configurators for existing .idea.
-            return ProjectUtil.openOrImportAsync(
-                path, PlatformProjectOpenProcessor.createOptionsToOpenDotIdeaOrCreateNewIfNotExists(path, null)
-                    .withForceOpenInNewFrame(true)
-            )
+        override suspend fun open(directory: String): Project? = withContext(Dispatchers.IO) {
+            // The public overload initializes fresh/moduleless projects and retains normal trust prompts.
+            ProjectUtil.openOrImport(Path.of(directory), null, true)
         }
 
         override suspend fun focus(project: Project): Boolean {
