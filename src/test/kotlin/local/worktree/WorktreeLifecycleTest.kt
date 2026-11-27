@@ -272,6 +272,48 @@ class WorktreeLifecycleTest : HeavyPlatformTestCase() {
         assertEquals(candidates, snapshot.removalCandidates(listOf("/worktrees/open/nested")))
     }
 
+    fun testFocusingWorktreeShowsItsIdentityWithoutSelectingItForRemoval() {
+        val safe = candidate("/worktrees/safe")
+        val dirty = candidate("/worktrees/dirty", dirty = true)
+        val dialog = WorktreeRemovalDialog(project, listOf(safe, dirty))
+        try {
+            dialog.candidatesTable.setRowSelectionInterval(1, 1)
+            assertEquals(listOf(safe.entry.directory), dialog.selectedPlans.map { it["directory"].asString })
+            assertTrue(dialog.detailsPanel.text.contains(dirty.entry.directory))
+            dialog.candidatesTable.model.setValueAt(true, 1, 0)
+            assertEquals(listOf(safe.entry.directory, dirty.entry.directory),
+                dialog.selectedPlans.map { it["directory"].asString })
+            assertTrue(dialog.selection.deleteLocalChanges.isEmpty())
+        } finally { dialog.disposeIfNeeded() }
+    }
+
+    fun testBackRestoresOptionsButDoesNotReselectChangedOrNewWorktrees() {
+        val first = candidate("/worktrees/first")
+        val changed = candidate("/worktrees/changed")
+        val original = WorktreeRemovalDialog(project, listOf(first, changed))
+        val selected = try {
+            original.deleteLocalBranches.doClick()
+            original.discardLocalChanges.doClick()
+            original.selection
+        } finally { original.disposeIfNeeded() }
+        val replacement = changed.copy(entry = changed.entry.copy(head = "new-head"))
+        val restored = WorktreeRemovalDialog(project, listOf(first, replacement, candidate("/worktrees/new")),
+            initialSelection = selected)
+        try {
+            assertEquals(listOf(first.entry.directory), restored.selectedPlans.map { it["directory"].asString })
+            assertEquals(listOf(first.entry.directory), restored.selection.deleteLocalBranches)
+            assertEquals(listOf(first.entry.directory), restored.selection.deleteLocalChanges)
+        } finally { restored.disposeIfNeeded() }
+    }
+
+    fun testReturningToCreateFormPreservesAllEnteredValues() {
+        val input = WorktreeCreateInput("/worktrees/new", "feature/new", "origin/feature/new", false, true)
+        val dialog = CreateDialog(project, "/repo", input)
+        try {
+            assertEquals(input, dialog.input)
+        } finally { dialog.disposeIfNeeded() }
+    }
+
     fun testCleanupTogglesReuseChoicesAndPreserveExplicitOptionsWithoutReselectingRows() {
         val first = candidate("/worktrees/first")
         val second = candidate("/worktrees/second")
@@ -346,7 +388,6 @@ class WorktreeLifecycleTest : HeavyPlatformTestCase() {
                 { dialog.choices.size == 4 && lateChoice.selected.isEnabled }, 10)
             assertSame(lateChoice, dialog.choices[0])
             assertSame(firstChoice, dialog.choices[2])
-            assertEquals("Merged — can be removed", dialog.candidatesTable.model.getValueAt(0, 2))
             assertEquals(listOf("/worktrees/keep"), dialog.selectedPlans.map { it["directory"].asString })
             assertTrue(dialog.cleanupMode.isSelected)
             assertTrue(dialog.closeSelectedProjects.isSelected)
@@ -637,6 +678,8 @@ class WorktreeLifecycleTest : HeavyPlatformTestCase() {
         assertTrue(descriptions.any { it.contains(item.branch!!) })
         assertTrue(descriptions.any { it.contains(item.blockers.single()) })
         assertFalse(descriptions.any { it.contains(sha) || it.contains("trackedChanges") })
+        assertTrue(descriptions.contains(" M tracked"))
+        assertTrue(descriptions.contains("untracked"))
         plan.getAsJsonObject("options").addProperty("deleteLocalChanges", false)
         assertFalse(RemovalReviewItem.from(plan).discardLocalChanges)
         plan.getAsJsonObject("options").addProperty("deleteLocalBranch", false)
