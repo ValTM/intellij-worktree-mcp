@@ -4,7 +4,6 @@ import com.intellij.icons.AllIcons
 import com.intellij.openapi.components.service
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.project.Project
-import git4idea.repo.GitRemote
 import git4idea.repo.GitRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
@@ -23,8 +22,6 @@ import org.jetbrains.plugins.github.exceptions.GithubAuthenticationException
 import org.jetbrains.plugins.github.exceptions.GithubJsonException
 import org.jetbrains.plugins.github.exceptions.GithubRateLimitExceededException
 import org.jetbrains.plugins.github.exceptions.GithubStatusCodeException
-import org.jetbrains.plugins.github.pullrequest.ui.GHPRProjectViewModel
-import org.jetbrains.plugins.github.util.GHGitRepositoryMapping
 import org.jetbrains.plugins.github.util.GHHostedRepositoriesManager
 import org.jetbrains.plugins.github.util.GithubUrlUtil
 import java.io.IOException
@@ -64,15 +61,11 @@ internal class GithubWorktreeStatusProvider(private val project: Project) : Work
                 GHRepositoryCoordinates(server, path)
             }
             val matching = accounts.filter { it.server == coordinates.serverPath }
-            val connected = project.getServiceIfCreated(GHPRProjectViewModel::class.java)
-                ?.connectedProjectVm?.value?.dataContext?.takeIf {
-                    it.repositoryDataService.repositoryMapping.matchesReviewRepository(repository, remote, coordinates)
-                }?.securityService?.account
-            val account = githubReviewAccount(matching, project.service<GithubProjectDefaultAccountHolder>().account, connected)
+            val account = githubReviewAccount(matching, project.service<GithubProjectDefaultAccountHolder>().account)
                 ?: return githubStatusFailure(
                     if (matching.isEmpty()) "Login required" else "Choose account",
                     if (matching.isEmpty()) "Log in to ${coordinates.serverPath.host} in Settings > Version Control > GitHub"
-                    else "Select an account for this repository in the GitHub pull request panel or set the project default GitHub account; multiple accounts match ${coordinates.serverPath.host}",
+                    else "Set the project default GitHub account; multiple accounts match ${coordinates.serverPath.host}",
                 )
             context = "$coordinates, branch $branch, account ${account.name}"
             val key = "${account.id}\u0000$coordinates\u0000${remote.name}\u0000${remote.urls}\u0000$branch"
@@ -151,14 +144,9 @@ internal class GithubWorktreeStatusProvider(private val project: Project) : Work
     }
 }
 
-internal fun GHGitRepositoryMapping.matchesReviewRepository(
-    repository: GitRepository, remote: GitRemote, coordinates: GHRepositoryCoordinates,
-): Boolean = gitRepository == repository && gitRemote == remote && this.repository == coordinates
-
 internal fun githubReviewAccount(
-    matching: List<GithubAccount>, projectDefault: GithubAccount?, connected: GithubAccount?,
-): GithubAccount? = connected?.takeIf { it in matching }
-    ?: projectDefault?.takeIf { it in matching }
+    matching: List<GithubAccount>, projectDefault: GithubAccount?,
+): GithubAccount? = projectDefault?.takeIf { it in matching }
     ?: matching.singleOrNull()
 
 internal fun githubStatusFailure(label: String, reason: String): WorktreeReviewStatus {
