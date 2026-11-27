@@ -92,8 +92,13 @@ def main():
         with ThreadPoolExecutor(max_workers=2) as pool:
             calls = [pool.submit(tool, "worktree_open", directory=str(path)) for path in (project, alias)]
             outcomes = [call.result() for call in calls]
-        assert sorted(r["status"] for r in outcomes) == ["opened", "reused"], outcomes
+        statuses = [r["status"] for r in outcomes]
+        assert statuses.count("opened") == 1 and all(
+            status in {"opened", "reused", "operation_in_progress"} for status in statuses
+        ), outcomes
         assert all(r["directory"] == str(project) and "merge" not in r for r in outcomes), outcomes
+        reused = tool("worktree_open", directory=str(alias))
+        assert reused["status"] == "reused" and reused["directory"] == str(project), reused
         opened = inventory()
         assert set(opened) == set(initial) | {str(project)}, opened
         assert all(opened[p]["frame"] == initial[p]["frame"] for p in initial)

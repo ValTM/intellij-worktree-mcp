@@ -13,10 +13,11 @@ open class OpenReviewInWorktreeAction(private val merge: Boolean = false) : Dumb
 
     override fun update(event: AnActionEvent) {
         event.presentation.isEnabledAndVisible = available(event)
+        event.presentation.isEnabled = event.presentation.isVisible && !WorktreeOperations.lifecycleBusy
     }
 
     override fun actionPerformed(event: AnActionEvent) {
-        if (!available(event)) return
+        if (WorktreeOperations.lifecycleBusy || !available(event)) return
         val project = event.project ?: return
         val worktree = event.getData(selectedWorktrees)?.singleOrNull() ?: return
         openSelectedWorktreeReview(project, worktree, merge)
